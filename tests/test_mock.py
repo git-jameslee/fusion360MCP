@@ -832,6 +832,77 @@ class TestMockCAM:
         assert "tool_diameter" in result
         assert "has_toolpath" in result
 
+    def test_cam_get_toolpath_status(self):
+        result = mock_command("cam_get_toolpath_status", {"setup_name": "Setup1"})
+        assert "setups" in result
+        assert "summary" in result
+        assert len(result["setups"]) > 0
+        setup = result["setups"][0]
+        assert "operations" in setup
+        op = setup["operations"][0]
+        assert "has_toolpath" in op
+        assert "is_valid" in op
+        assert "is_outdated" in op
+
+    def test_cam_get_operation_details(self):
+        result = mock_command(
+            "cam_get_operation_details",
+            {"setup_name": "Setup1", "operation_name": "Adaptive1"},
+        )
+        assert result["name"] == "Adaptive1"
+        assert "tool" in result
+        assert "parameters" in result
+        assert "strategy" in result
+
+    def test_cam_update_operation_parameters(self):
+        result = mock_command(
+            "cam_update_operation_parameters",
+            {
+                "setup_name": "Setup1",
+                "operation_name": "Adaptive1",
+                "parameters": {"cutting_feedrate_mmpm": 1500.0},
+            },
+        )
+        assert result["success"] is True
+        assert "cutting_feedrate_mmpm" in result["updated"]
+
+    def test_cam_get_tools(self):
+        result = mock_command("cam_get_tools")
+        assert "tools" in result
+        assert "count" in result
+        assert len(result["tools"]) > 0
+        tool = result["tools"][0]["tool"]
+        assert "tool_diameter" in tool
+        assert "tool_type" in tool
+
+    def test_cam_get_machining_time(self):
+        result = mock_command("cam_get_machining_time", {"setup_name": "Setup1"})
+        assert "setups" in result
+        setup = result["setups"][0]
+        assert "total_time_seconds" in setup
+        assert "operations" in setup
+
+    def test_cam_get_library_tools(self):
+        result = mock_command("cam_get_library_tools")
+        assert "libraries" in result
+        assert "library_count" in result
+
+    def test_cam_update_setup_machine_params(self):
+        result = mock_command(
+            "cam_update_setup_machine_params",
+            {
+                "setup_name": "Setup1",
+                "machine_params": {"max_spindle_speed_rpm": 24000},
+            },
+        )
+        assert result["success"] is True
+        assert "max_spindle_speed_rpm" in result["updated"]
+
+    def test_cam_get_nc_programs(self):
+        result = mock_command("cam_get_nc_programs")
+        assert "nc_programs" in result
+        assert "count" in result
+
 
 class TestMockDesignTypeSafety:
     def test_get_design_type(self):

@@ -102,6 +102,9 @@ class CommandHandler:
             # parametric & agent-authored changes
             "set_parameter",
             "execute_code",
+            # CAM writes
+            "cam_update_operation_parameters",
+            "cam_update_setup_machine_params",
         }
     )
 
@@ -196,7 +199,7 @@ class CommandHandler:
                 "unfold": self.unfold,
                 # code execution
                 "execute_code": self.execute_code,
-                # CAM
+                # CAM — existing
                 "cam_list_setups": self.cam_list_setups,
                 "cam_list_operations": self.cam_list_operations,
                 "cam_get_operation_info": self.cam_get_operation_info,
@@ -204,6 +207,15 @@ class CommandHandler:
                 "cam_create_operation": self.cam_create_operation,
                 "cam_generate_toolpath": self.cam_generate_toolpath,
                 "cam_post_process": self.cam_post_process,
+                # CAM — extended (Step 2)
+                "cam_get_toolpath_status": self.cam_get_toolpath_status,
+                "cam_get_operation_details": self.cam_get_operation_details,
+                "cam_update_operation_parameters": self.cam_update_operation_parameters,
+                "cam_get_tools": self.cam_get_tools,
+                "cam_get_machining_time": self.cam_get_machining_time,
+                "cam_get_library_tools": self.cam_get_library_tools,
+                "cam_update_setup_machine_params": self.cam_update_setup_machine_params,
+                "cam_get_nc_programs": self.cam_get_nc_programs,
                 # health
                 "ping": self.ping,
                 # design type safety
@@ -2722,6 +2734,545 @@ class CommandHandler:
             "output_folder": output_folder,
             "units": output_units,
         }
+
+    # ------------------------------------------------------------------
+    # CAM — extended query / write tools (Step 2)
+    # ------------------------------------------------------------------
+
+    # ── private helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _safe_cam_attr(obj, attr, default=None):
+        """Return obj.attr, or *default* if the attribute is missing or raises."""
+        try:
+            val = getattr(obj, attr, default)
+            return default if val is None else val
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_cam_iter(collection):
+        """Yield items from a Fusion collection, skipping any that raise."""
+        try:
+            count = collection.count
+        except Exception:
+            return
+        for i in range(count):
+            try:
+                yield collection.item(i)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _read_cam_param(params_obj, name):
+        """Read a CAM ParameterList entry; return numeric value or None."""
+        try:
+            p = params_obj.itemByName(name)
+            if p is None:
+                return None
+            val = p.value
+            if hasattr(val, "value"):
+                val = val.value
+            return val
+        except Exception:
+            return None
+
+    def _find_operation_all(self, setup, name: str):
+        """Find operation by name using allOperations (includes folder-nested ops)."""
+        for op in self._safe_cam_iter(setup.allOperations):
+            if op.name == name:
+                return op
+        raise RuntimeError(f"Operation '{name}' not found in setup '{setup.name}'")
+
+    def _extract_tool_record(self, tool):
+        """Return a dict of geometry/type info for a tool object."""
+        info = {}
+        try:
+            tp = tool.parameters
+            for key in (
+                "tool_number", "tool_diameter", "tool_fluteLength",
+                "tool_shoulderLength", "tool_overallLength",
+                "tool_numberOfFlutes", "tool_cornerRadius",
+            ):
+                val = self._read_cam_param(tp, key)
+                if val is not None:
+                    if key in ("tool_diameter", "tool_fluteLength",
+                               "tool_shoulderLength", "tool_overallLength",
+                               "tool_cornerRadius"):
+                        val = round(val * 10, 4)  # cm → mm
+                    info[key] = val
+        except Exception:
+            pass
+        try:
+            info["tool_type"] = str(tool.type)
+        except Exception:
+            pass
+        try:
+            info["description"] = tool.description
+        except Exception:
+            pass
+        return info
+
+    # ── 1. cam_get_toolpath_status ─────────────────────────────────────
+
+    def cam_get_toolpath_status(self, setup_name: str = None):
+        cam = self._get_cam()
+
+        if setup_name:
+            setups = [self._find_setup(cam, setup_name)]
+        else:
+            setups = list(self._safe_cam_iter(cam.setups))
+
+        result = []
+        for setup in setups:
+            ops = []
+            for op in self._safe_cam_iter(setup.allOperations):
+                has_tp = self._safe_cam_attr(op, "hasToolpath", False)
+                valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
+                ops.append({
+                    "name": op.name,
+                    "is_suppressed": self._safe_cam_attr(op, "isSuppressed", False),
+                    "has_toolpath": has_tp,
+                    "is_valid": valid,
+                    "is_outdated": has_tp and not valid,
+                })
+            result.append({"name": setup.name, "operations": ops})
+
+        total = sum(len(s["operations"]) for s in result)
+        with_tp = sum(
+            1 for s in result for o in s["operations"] if o["has_toolpath"]
+        )
+        valid_count = sum(
+            1 for s in result for o in s["operations"] if o["is_valid"]
+        )
+        return {
+            "setups": result,
+            "summary": {
+                "total_operations": total,
+                "with_toolpath": with_tp,
+                "valid": valid_count,
+                "outdated": with_tp - valid_count,
+            },
+        }
+
+    # ── 2. cam_get_operation_details ───────────────────────────────────
+
+    def cam_get_operation_details(self, setup_name: str, operation_name: str):
+        cam = self._get_cam()
+        setup = self._find_setup(cam, setup_name)
+        op = self._find_operation_all(setup, operation_name)
+        op_params = op.parameters
+
+        # Tool
+        tool_info = {}
+        try:
+            tool = op.tool
+            if tool:
+                tool_info = self._extract_tool_record(tool)
+        except Exception:
+            pass
+
+        # Parameters — return raw internal values; caller interprets units
+        PARAM_KEYS = [
+            "tool_feedCutting", "tool_feedEntry", "tool_feedExit",
+            "tool_feedPlunge", "tool_feedRamp", "tool_feedReducedCutting",
+            "tool_spindleSpeed", "tool_spindleDirection",
+            "stepover", "stepdown", "optimalLoad",
+            "tolerance", "stockToLeave", "axialStock",
+            "tool_coolant",
+        ]
+        params_out = {}
+        for key in PARAM_KEYS:
+            val = self._read_cam_param(op_params, key)
+            if val is not None:
+                # Convert cm-based values to mm for readability
+                if key in ("stepover", "stepdown", "optimalLoad",
+                           "tolerance", "stockToLeave", "axialStock"):
+                    val = round(val * 10, 4)  # cm → mm
+                elif "feed" in key.lower():
+                    val = round(val * 10, 4)  # cm/min → mm/min
+                params_out[key] = val
+
+        # Also auto-capture any visible param not already in the list
+        try:
+            for p in self._safe_cam_iter(op_params):
+                if p.name in params_out or p.name in PARAM_KEYS:
+                    continue
+                try:
+                    if not p.isVisible:
+                        continue
+                except Exception:
+                    pass
+                v = self._read_cam_param(op_params, p.name)
+                if v is not None:
+                    params_out[p.name] = v
+        except Exception:
+            pass
+
+        has_tp = self._safe_cam_attr(op, "hasToolpath", False)
+        valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
+
+        return {
+            "name": op.name,
+            "strategy": str(op.strategy) if hasattr(op, "strategy") else None,
+            "is_suppressed": self._safe_cam_attr(op, "isSuppressed", False),
+            "has_toolpath": has_tp,
+            "is_valid": valid,
+            "tool": tool_info,
+            "parameters": params_out,
+        }
+
+    # ── 3. cam_update_operation_parameters ────────────────────────────
+
+    # Maps user-friendly keys → (fusion_param_name, expression_unit_suffix)
+    _OP_PARAM_MAP = {
+        "cutting_feedrate_mmpm":  ("tool_feedCutting",          "mm/min"),
+        "entry_feedrate_mmpm":    ("tool_feedEntry",             "mm/min"),
+        "exit_feedrate_mmpm":     ("tool_feedExit",              "mm/min"),
+        "plunge_feedrate_mmpm":   ("tool_feedPlunge",            "mm/min"),
+        "ramp_feedrate_mmpm":     ("tool_feedRamp",              "mm/min"),
+        "reduced_feedrate_mmpm":  ("tool_feedReducedCutting",    "mm/min"),
+        "spindle_speed_rpm":      ("tool_spindleSpeed",          "rpm"),
+        "stepover_mm":            ("stepover",                   "mm"),
+        "stepdown_mm":            ("stepdown",                   "mm"),
+        "optimal_load_mm":        ("optimalLoad",                "mm"),
+        "tolerance_mm":           ("tolerance",                  "mm"),
+        "stock_to_leave_mm":      ("stockToLeave",               "mm"),
+        "axial_stock_mm":         ("axialStock",                 "mm"),
+    }
+
+    def cam_update_operation_parameters(
+        self, setup_name: str, operation_name: str, parameters: dict
+    ):
+        cam = self._get_cam()
+        setup = self._find_setup(cam, setup_name)
+        op = self._find_operation_all(setup, operation_name)
+        op_params = op.parameters
+
+        updated = []
+        skipped = []
+        warnings = []
+
+        for user_key, value in parameters.items():
+            if user_key not in self._OP_PARAM_MAP:
+                warnings.append(
+                    f"Unknown parameter '{user_key}' — valid keys: "
+                    + ", ".join(sorted(self._OP_PARAM_MAP))
+                )
+                skipped.append(user_key)
+                continue
+
+            fusion_key, unit = self._OP_PARAM_MAP[user_key]
+            try:
+                p = op_params.itemByName(fusion_key)
+                if p is None:
+                    warnings.append(
+                        f"'{fusion_key}' not available for this operation type"
+                    )
+                    skipped.append(user_key)
+                    continue
+                try:
+                    if p.isReadOnly:
+                        warnings.append(f"'{fusion_key}' is read-only")
+                        skipped.append(user_key)
+                        continue
+                except Exception:
+                    pass
+                p.expression = f"{value} {unit}"
+                updated.append(user_key)
+            except Exception as e:
+                warnings.append(f"Failed to set '{user_key}': {e}")
+                skipped.append(user_key)
+
+        adsk.doEvents()
+
+        return {
+            "success": len(updated) > 0,
+            "operation": operation_name,
+            "updated": updated,
+            "skipped": skipped,
+            "warnings": warnings,
+        }
+
+    # ── 4. cam_get_tools ───────────────────────────────────────────────
+
+    def cam_get_tools(self):
+        cam = self._get_cam()
+
+        # Build operation cross-reference: tool_number → [op names]
+        ops_by_tool_num = {}
+        for op in self._safe_cam_iter(cam.allOperations):
+            if self._safe_cam_attr(op, "isSuppressed"):
+                continue
+            try:
+                tool = op.tool
+                if tool:
+                    num = self._read_cam_param(tool.parameters, "tool_number")
+                    if num is not None:
+                        ops_by_tool_num.setdefault(int(num), []).append(op.name)
+            except Exception:
+                pass
+
+        tools_list = []
+
+        # Primary: document tool library
+        lib = self._safe_cam_attr(cam, "documentToolLibrary")
+        if lib:
+            for tool in self._safe_cam_iter(lib):
+                try:
+                    info = self._extract_tool_record(tool)
+                    num = int(info.get("tool_number", -1))
+                    tools_list.append({
+                        "tool": info,
+                        "used_in_operations": ops_by_tool_num.get(num, []),
+                    })
+                except Exception:
+                    pass
+
+        # Fallback: collect unique tools from operations
+        if not tools_list:
+            seen = {}
+            for op in self._safe_cam_iter(cam.allOperations):
+                if self._safe_cam_attr(op, "isSuppressed"):
+                    continue
+                try:
+                    tool = op.tool
+                    if tool:
+                        num = self._read_cam_param(tool.parameters, "tool_number")
+                        key = int(num) if num is not None else op.name
+                        if key not in seen:
+                            seen[key] = self._extract_tool_record(tool)
+                            tools_list.append({
+                                "tool": seen[key],
+                                "used_in_operations": ops_by_tool_num.get(
+                                    key if isinstance(key, int) else -1, []
+                                ),
+                            })
+                except Exception:
+                    pass
+
+        return {"tools": tools_list, "count": len(tools_list)}
+
+    # ── 5. cam_get_machining_time ──────────────────────────────────────
+
+    def cam_get_machining_time(self, setup_name: str = None):
+        cam = self._get_cam()
+
+        if setup_name:
+            setups = [self._find_setup(cam, setup_name)]
+        else:
+            setups = list(self._safe_cam_iter(cam.setups))
+
+        DEFAULT_RAPID = 500.0   # cm/min
+        DEFAULT_TC    = 0.0     # seconds
+
+        results = []
+        for setup in setups:
+            ops_data = []
+            total_time = 0.0
+
+            for op in self._safe_cam_iter(setup.allOperations):
+                has_tp = self._safe_cam_attr(op, "hasToolpath", False)
+                suppressed = self._safe_cam_attr(op, "isSuppressed", False)
+                op_entry = {
+                    "name": op.name,
+                    "has_toolpath": has_tp,
+                    "is_suppressed": suppressed,
+                }
+
+                if has_tp and not suppressed:
+                    try:
+                        tr = cam.getMachiningTime(op, 1.0, DEFAULT_RAPID, DEFAULT_TC)
+                        if tr:
+                            t = None
+                            for attr in ("machiningTime", "totalTime"):
+                                t = self._safe_cam_attr(tr, attr)
+                                if t is not None:
+                                    break
+                            if t is not None:
+                                op_entry["time_seconds"] = round(t, 2)
+                                total_time += t
+                    except Exception as e:
+                        op_entry["time_error"] = str(e)
+
+                ops_data.append(op_entry)
+
+            results.append({
+                "name": setup.name,
+                "total_time_seconds": round(total_time, 2),
+                "operations": ops_data,
+            })
+
+        return {"setups": results}
+
+    # ── 6. cam_get_library_tools ───────────────────────────────────────
+
+    def cam_get_library_tools(self, library_name: str = None):
+        cam = self._get_cam()
+
+        try:
+            lib_mgr = cam.libraryManager
+            tool_libs = lib_mgr.toolLibraries
+        except Exception as e:
+            raise RuntimeError(f"Cannot access CAM library manager: {e}")
+
+        results = []
+        locations = ["local", "fusion360", "cloud"]
+
+        for loc in locations:
+            try:
+                urls = tool_libs.urlsByLocation(
+                    getattr(adsk.cam.LibraryLocations,
+                            f"{loc.capitalize()}LibraryLocation", None)
+                    or adsk.cam.LibraryLocations.LocalLibraryLocation
+                )
+            except Exception:
+                continue
+
+            for i in range(urls.count):
+                try:
+                    url = urls.item(i)
+                    url_str = str(url)
+                    if library_name and library_name.lower() not in url_str.lower():
+                        continue
+                    lib = tool_libs.toolLibraryAtURL(url)
+                    if not lib:
+                        continue
+                    tools = []
+                    for tool in self._safe_cam_iter(lib):
+                        try:
+                            tools.append(self._extract_tool_record(tool))
+                        except Exception:
+                            pass
+                    results.append({
+                        "location": loc,
+                        "url": url_str,
+                        "tool_count": len(tools),
+                        "tools": tools,
+                    })
+                except Exception:
+                    continue
+
+        return {"libraries": results, "library_count": len(results)}
+
+    # ── 7. cam_update_setup_machine_params ────────────────────────────
+
+    _MACHINE_PARAM_MAP = {
+        "max_spindle_speed_rpm":       ("machine_maxSpindleSpeed",    "rpm"),
+        "min_spindle_speed_rpm":       ("machine_minSpindleSpeed",    "rpm"),
+        "max_cutting_feedrate_mmpm":   ("machine_maxFeedrate",        "mm/min"),
+        "rapid_feedrate_mmpm":         ("machine_rapidFeedrate",      "mm/min"),
+        "tool_change_time_s":          ("machine_toolChangetime",     "s"),
+    }
+
+    def cam_update_setup_machine_params(
+        self, setup_name: str, machine_params: dict
+    ):
+        cam = self._get_cam()
+        setup = self._find_setup(cam, setup_name)
+        setup_params = setup.parameters
+
+        updated = []
+        skipped = []
+        warnings = []
+
+        for user_key, value in machine_params.items():
+            if user_key not in self._MACHINE_PARAM_MAP:
+                warnings.append(
+                    f"Unknown param '{user_key}' — valid keys: "
+                    + ", ".join(sorted(self._MACHINE_PARAM_MAP))
+                )
+                skipped.append(user_key)
+                continue
+
+            fusion_key, unit = self._MACHINE_PARAM_MAP[user_key]
+            try:
+                p = setup_params.itemByName(fusion_key)
+                if p is None:
+                    warnings.append(
+                        f"'{fusion_key}' not available on this setup"
+                    )
+                    skipped.append(user_key)
+                    continue
+                try:
+                    if p.isReadOnly:
+                        warnings.append(f"'{fusion_key}' is read-only")
+                        skipped.append(user_key)
+                        continue
+                except Exception:
+                    pass
+                p.expression = f"{value} {unit}"
+                updated.append(user_key)
+            except Exception as e:
+                warnings.append(f"Failed to set '{user_key}': {e}")
+                skipped.append(user_key)
+
+        adsk.doEvents()
+
+        return {
+            "success": len(updated) > 0,
+            "setup": setup_name,
+            "updated": updated,
+            "skipped": skipped,
+            "warnings": warnings,
+        }
+
+    # ── 8. cam_get_nc_programs ─────────────────────────────────────────
+
+    def cam_get_nc_programs(self):
+        cam = self._get_cam()
+
+        programs = []
+        for nc in self._safe_cam_iter(cam.ncPrograms):
+            entry = {
+                "name": nc.name,
+                "is_suppressed": self._safe_cam_attr(nc, "isSuppressed", False),
+            }
+
+            # Operations
+            ops = []
+            for op in self._safe_cam_iter(nc.operations):
+                ops.append(op.name)
+            if ops:
+                entry["operations"] = ops
+                entry["operation_count"] = len(ops)
+
+            # Post-processor
+            try:
+                pp = nc.postConfiguration
+                if pp:
+                    pp_info = {}
+                    name = self._safe_cam_attr(pp, "name")
+                    if name:
+                        pp_info["name"] = name
+                    desc = self._safe_cam_attr(pp, "description")
+                    if desc:
+                        pp_info["description"] = desc
+                    try:
+                        url = pp.url()
+                        pp_info["url"] = str(url)
+                    except Exception:
+                        pass
+                    if pp_info:
+                        entry["post_processor"] = pp_info
+            except Exception:
+                pass
+
+            # Output settings
+            nc_params = self._safe_cam_attr(nc, "parameters")
+            if nc_params:
+                settings = {}
+                for key in ("nc_program_filename", "nc_program_openInEditor",
+                            "nc_program_number"):
+                    val = self._read_cam_param(nc_params, key)
+                    if val is not None:
+                        settings[key] = val
+                if settings:
+                    entry["settings"] = settings
+
+            programs.append(entry)
+
+        return {"nc_programs": programs, "count": len(programs)}
 
     # ------------------------------------------------------------------
     # Health check

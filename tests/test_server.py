@@ -104,6 +104,12 @@ class TestToolAnnotations:
             "cam_list_setups",
             "cam_list_operations",
             "cam_get_operation_info",
+            "cam_get_toolpath_status",
+            "cam_get_operation_details",
+            "cam_get_tools",
+            "cam_get_machining_time",
+            "cam_get_library_tools",
+            "cam_get_nc_programs",
             "get_design_type",
             "render_view",
         }

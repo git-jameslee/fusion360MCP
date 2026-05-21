@@ -2138,6 +2138,160 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── CAM extended (Step 2) ─────────────────────────────────────────
+    {
+        "name": "cam_get_toolpath_status",
+        "title": "Get Toolpath Status",
+        "description": (
+            "Query toolpath generation status for every operation. "
+            "Returns has_toolpath, is_valid, and is_outdated per operation. "
+            "Use after cam_generate_toolpath to verify success."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "setup_name": {
+                    "type": "string",
+                    "description": "Filter to a specific setup (omit for all setups)",
+                },
+            },
+        },
+    },
+    {
+        "name": "cam_get_operation_details",
+        "title": "Get CAM Operation Details",
+        "description": (
+            "Full parameter dump for a specific CAM operation: "
+            "feeds, speeds, stepover, stepdown, tolerance, tool geometry. "
+            "Deeper than cam_get_operation_info."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["setup_name", "operation_name"],
+            "properties": {
+                "setup_name": {"type": "string"},
+                "operation_name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "cam_update_operation_parameters",
+        "title": "Update CAM Operation Parameters",
+        "description": (
+            "Write feeds, speeds, and engagement parameters to a CAM operation. "
+            "Accepts any subset of: cutting_feedrate_mmpm, entry_feedrate_mmpm, "
+            "exit_feedrate_mmpm, plunge_feedrate_mmpm, ramp_feedrate_mmpm, "
+            "reduced_feedrate_mmpm, spindle_speed_rpm, stepover_mm, stepdown_mm, "
+            "optimal_load_mm, tolerance_mm, stock_to_leave_mm, axial_stock_mm. "
+            "Does NOT auto-generate toolpaths — call cam_generate_toolpath after."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["setup_name", "operation_name", "parameters"],
+            "properties": {
+                "setup_name": {"type": "string"},
+                "operation_name": {"type": "string"},
+                "parameters": {
+                    "type": "object",
+                    "description": (
+                        "Key/value pairs to update. "
+                        "Keys: cutting_feedrate_mmpm, spindle_speed_rpm, "
+                        "stepover_mm, stepdown_mm, tolerance_mm, etc."
+                    ),
+                    "additionalProperties": {"type": "number"},
+                },
+            },
+        },
+    },
+    {
+        "name": "cam_get_tools",
+        "title": "Get Document CAM Tools",
+        "description": (
+            "List all tools in the document's CAM tool library with geometry, "
+            "type, and which operations use each tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "cam_get_machining_time",
+        "title": "Get Machining Time",
+        "description": (
+            "Return estimated cycle time per operation and setup total. "
+            "Only available after toolpaths have been generated. "
+            "Operations without toolpaths return no time entry."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "setup_name": {
+                    "type": "string",
+                    "description": "Filter to a specific setup (omit for all)",
+                },
+            },
+        },
+    },
+    {
+        "name": "cam_get_library_tools",
+        "title": "Get CAM Library Tools",
+        "description": (
+            "Query external tool libraries available in Fusion 360 "
+            "(local, Fusion 360 cloud, and hub libraries). "
+            "Use to browse the full tool inventory for selecting better tools."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "library_name": {
+                    "type": "string",
+                    "description": (
+                        "Filter by library name substring "
+                        "(omit for all libraries)"
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "cam_update_setup_machine_params",
+        "title": "Update Setup Machine Parameters",
+        "description": (
+            "Update machine-level limits on a CAM setup: "
+            "max_spindle_speed_rpm, min_spindle_speed_rpm, "
+            "max_cutting_feedrate_mmpm, rapid_feedrate_mmpm, tool_change_time_s."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["setup_name", "machine_params"],
+            "properties": {
+                "setup_name": {"type": "string"},
+                "machine_params": {
+                    "type": "object",
+                    "description": (
+                        "Machine parameters to update. "
+                        "Keys: max_spindle_speed_rpm, min_spindle_speed_rpm, "
+                        "max_cutting_feedrate_mmpm, rapid_feedrate_mmpm, "
+                        "tool_change_time_s."
+                    ),
+                    "additionalProperties": {"type": "number"},
+                },
+            },
+        },
+    },
+    {
+        "name": "cam_get_nc_programs",
+        "title": "Get NC Programs",
+        "description": (
+            "List all NC programs defined in the document with their "
+            "post-processor settings, associated operations, and output paths."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 # ── tool annotations ──────────────────────────────────────────────────
@@ -2157,6 +2311,12 @@ _READ_ONLY = {
     "cam_list_setups",
     "cam_list_operations",
     "cam_get_operation_info",
+    "cam_get_toolpath_status",
+    "cam_get_operation_details",
+    "cam_get_tools",
+    "cam_get_machining_time",
+    "cam_get_library_tools",
+    "cam_get_nc_programs",
     "get_design_type",
     "render_view",
 }
@@ -2176,6 +2336,12 @@ _IDEMPOTENT = {
     "cam_list_setups",
     "cam_list_operations",
     "cam_get_operation_info",
+    "cam_get_toolpath_status",
+    "cam_get_operation_details",
+    "cam_get_tools",
+    "cam_get_machining_time",
+    "cam_get_library_tools",
+    "cam_get_nc_programs",
     "get_design_type",
     "set_design_type",
     "rename_body",

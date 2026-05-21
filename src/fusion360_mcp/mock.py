@@ -56,6 +56,8 @@ _MUTATION_MOCKS: frozenset[str] = frozenset(
         "undo",
         "set_parameter",
         "execute_code",
+        "cam_update_operation_parameters",
+        "cam_update_setup_machine_params",
     }
 )
 
@@ -228,7 +230,12 @@ def _boolean_operation(p: dict) -> dict:
 
 
 def _delete_all(_p: dict) -> dict:
-    return {"deleted": True, "bodies_remaining": 0, "items_deleted": 0, "items_failed": 0}
+    return {
+        "deleted": True,
+        "bodies_remaining": 0,
+        "items_deleted": 0,
+        "items_failed": 0,
+    }
 
 
 def _undo(_p: dict) -> dict:
@@ -825,6 +832,159 @@ def _cam_get_operation_info(p: dict) -> dict:
     }
 
 
+# ── CAM extended (Step 2) ─────────────────────────────────────────────
+
+
+def _cam_get_toolpath_status(p: dict) -> dict:
+    setup = p.get("setup_name", "Setup1")
+    return {
+        "setups": [
+            {
+                "name": setup,
+                "operations": [
+                    {
+                        "name": "Adaptive1",
+                        "is_suppressed": False,
+                        "has_toolpath": True,
+                        "is_valid": True,
+                        "is_outdated": False,
+                    }
+                ],
+            }
+        ],
+        "summary": {
+            "total_operations": 1,
+            "with_toolpath": 1,
+            "valid": 1,
+            "outdated": 0,
+        },
+    }
+
+
+def _cam_get_operation_details(p: dict) -> dict:
+    return {
+        "name": p.get("operation_name", "Adaptive1"),
+        "strategy": "adaptive",
+        "is_suppressed": False,
+        "has_toolpath": True,
+        "is_valid": True,
+        "tool": {
+            "tool_number": 1,
+            "tool_diameter": 6.0,
+            "tool_fluteLength": 20.0,
+            "tool_overallLength": 60.0,
+            "tool_numberOfFlutes": 3,
+            "tool_type": "flat end mill",
+        },
+        "parameters": {
+            "tool_feedCutting": 1200.0,
+            "tool_spindleSpeed": 18000.0,
+            "stepover": 1.5,
+            "stepdown": 3.0,
+            "tolerance": 0.01,
+        },
+    }
+
+
+def _cam_update_operation_parameters(p: dict) -> dict:
+    params = p.get("parameters", {})
+    return {
+        "success": True,
+        "operation": p.get("operation_name", "Adaptive1"),
+        "updated": list(params.keys()),
+        "skipped": [],
+        "warnings": [],
+    }
+
+
+def _cam_get_tools(_p: dict) -> dict:
+    return {
+        "tools": [
+            {
+                "tool": {
+                    "tool_number": 1,
+                    "tool_diameter": 6.0,
+                    "tool_fluteLength": 20.0,
+                    "tool_overallLength": 60.0,
+                    "tool_numberOfFlutes": 3,
+                    "tool_type": "flat end mill",
+                    "description": "6mm Flat End Mill",
+                },
+                "used_in_operations": ["Adaptive1"],
+            }
+        ],
+        "count": 1,
+    }
+
+
+def _cam_get_machining_time(p: dict) -> dict:
+    setup = p.get("setup_name", "Setup1")
+    return {
+        "setups": [
+            {
+                "name": setup,
+                "total_time_seconds": 342.5,
+                "operations": [
+                    {
+                        "name": "Adaptive1",
+                        "has_toolpath": True,
+                        "is_suppressed": False,
+                        "time_seconds": 342.5,
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def _cam_get_library_tools(p: dict) -> dict:
+    return {
+        "libraries": [
+            {
+                "location": "local",
+                "url": "local://tool-library",
+                "tool_count": 1,
+                "tools": [
+                    {
+                        "tool_number": 1,
+                        "tool_diameter": 6.0,
+                        "tool_type": "flat end mill",
+                        "description": "6mm Flat End Mill",
+                    }
+                ],
+            }
+        ],
+        "library_count": 1,
+    }
+
+
+def _cam_update_setup_machine_params(p: dict) -> dict:
+    params = p.get("machine_params", {})
+    return {
+        "success": True,
+        "setup": p.get("setup_name", "Setup1"),
+        "updated": list(params.keys()),
+        "skipped": [],
+        "warnings": [],
+    }
+
+
+def _cam_get_nc_programs(_p: dict) -> dict:
+    return {
+        "nc_programs": [
+            {
+                "name": "NC Program1",
+                "is_suppressed": False,
+                "operations": ["Adaptive1"],
+                "operation_count": 1,
+                "post_processor": {"name": "fanuc"},
+                "settings": {"nc_program_filename": "NC Program1"},
+            }
+        ],
+        "count": 1,
+    }
+
+
 # ── perception (viewport render) ─────────────────────────────────────
 
 # 1x1 transparent PNG, enough to exercise the image-content code path.
@@ -943,7 +1103,7 @@ _DISPATCH: dict[str, Any] = {
     "create_bend": _create_bend,
     "flat_pattern": _flat_pattern,
     "unfold": _unfold,
-    # CAM / manufacturing
+    # CAM / manufacturing — existing
     "cam_create_setup": _cam_create_setup,
     "cam_create_operation": _cam_create_operation,
     "cam_generate_toolpath": _cam_generate_toolpath,
@@ -951,6 +1111,15 @@ _DISPATCH: dict[str, Any] = {
     "cam_list_setups": _cam_list_setups,
     "cam_list_operations": _cam_list_operations,
     "cam_get_operation_info": _cam_get_operation_info,
+    # CAM / manufacturing — extended (Step 2)
+    "cam_get_toolpath_status": _cam_get_toolpath_status,
+    "cam_get_operation_details": _cam_get_operation_details,
+    "cam_update_operation_parameters": _cam_update_operation_parameters,
+    "cam_get_tools": _cam_get_tools,
+    "cam_get_machining_time": _cam_get_machining_time,
+    "cam_get_library_tools": _cam_get_library_tools,
+    "cam_update_setup_machine_params": _cam_update_setup_machine_params,
+    "cam_get_nc_programs": _cam_get_nc_programs,
     # design type safety
     "get_design_type": _get_design_type,
     "set_design_type": _set_design_type,
