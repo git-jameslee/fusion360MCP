@@ -2689,16 +2689,41 @@ class CommandHandler:
     ):
         cam = self._get_cam()
 
+        def _wait_for_toolpath(future):
+            """Poll until generation completes. Works across Fusion API versions."""
+            import time
+            # New API: allOperationsGeneratedSuccessfully blocks until done
+            try:
+                _ = future.allOperationsGeneratedSuccessfully
+                return  # property access blocks until complete
+            except AttributeError:
+                pass
+            # Old API: .wait()
+            try:
+                future.wait()
+                return
+            except AttributeError:
+                pass
+            # Fallback: poll with doEvents
+            for _ in range(300):  # up to ~30s
+                adsk.doEvents()
+                time.sleep(0.1)
+                try:
+                    if future.allOperationsGeneratedSuccessfully:
+                        return
+                except Exception:
+                    pass
+
         if generate_all:
             future = cam.generateAllToolpaths(False)
-            future.wait()
+            _wait_for_toolpath(future)
             return {"generated": True, "scope": "all"}
 
         if operation_name and setup_name:
             setup = self._find_setup(cam, setup_name)
             op = self._find_operation(setup, operation_name)
             future = cam.generateToolpath(op)
-            future.wait()
+            _wait_for_toolpath(future)
             return {
                 "generated": True,
                 "scope": "operation",
@@ -2711,7 +2736,7 @@ class CommandHandler:
             for i in range(setup.operations.count):
                 ops.add(setup.operations.item(i))
             future = cam.generateToolpath(ops)
-            future.wait()
+            _wait_for_toolpath(future)
             return {"generated": True, "scope": "setup", "setup": setup_name}
 
         raise RuntimeError("Provide setup_name, operation_name, or generate_all=true")
@@ -2914,21 +2939,8 @@ class CommandHandler:
                     val = round(val * 10, 4)  # cm/min → mm/min
                 params_out[key] = val
 
-        # Also auto-capture any visible param not already in the list
-        try:
-            for p in self._safe_cam_iter(op_params):
-                if p.name in params_out or p.name in PARAM_KEYS:
-                    continue
-                try:
-                    if not p.isVisible:
-                        continue
-                except Exception:
-                    pass
-                v = self._read_cam_param(op_params, p.name)
-                if v is not None:
-                    params_out[p.name] = v
-        except Exception:
-            pass
+        # Auto-capture is intentionally omitted — iterating all CAM params
+        # is too expensive and causes TCP bridge timeouts.
 
         has_tp = self._safe_cam_attr(op, "hasToolpath", False)
         valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
