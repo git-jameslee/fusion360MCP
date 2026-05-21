@@ -2689,45 +2689,26 @@ class CommandHandler:
     ):
         cam = self._get_cam()
 
-        def _wait_for_toolpath(future):
-            """Poll until generation completes. Works across Fusion API versions."""
-            import time
-            # New API: allOperationsGeneratedSuccessfully blocks until done
-            try:
-                _ = future.allOperationsGeneratedSuccessfully
-                return  # property access blocks until complete
-            except AttributeError:
-                pass
-            # Old API: .wait()
-            try:
-                future.wait()
-                return
-            except AttributeError:
-                pass
-            # Fallback: poll with doEvents
-            for _ in range(300):  # up to ~30s
-                adsk.doEvents()
-                time.sleep(0.1)
-                try:
-                    if future.allOperationsGeneratedSuccessfully:
-                        return
-                except Exception:
-                    pass
+        # Toolpath generation runs in Fusion's background and can take minutes.
+        # We start it and return immediately to avoid TCP bridge timeout.
+        # The caller should poll with cam_get_toolpath_status to confirm completion.
+        note = "Generation started. Call cam_get_toolpath_status to verify completion."
 
         if generate_all:
-            future = cam.generateAllToolpaths(False)
-            _wait_for_toolpath(future)
-            return {"generated": True, "scope": "all"}
+            cam.generateAllToolpaths(False)
+            adsk.doEvents()
+            return {"generation_started": True, "scope": "all", "note": note}
 
         if operation_name and setup_name:
             setup = self._find_setup(cam, setup_name)
             op = self._find_operation(setup, operation_name)
-            future = cam.generateToolpath(op)
-            _wait_for_toolpath(future)
+            cam.generateToolpath(op)
+            adsk.doEvents()
             return {
-                "generated": True,
+                "generation_started": True,
                 "scope": "operation",
                 "operation": operation_name,
+                "note": note,
             }
 
         if setup_name:
@@ -2735,9 +2716,9 @@ class CommandHandler:
             ops = adsk.core.ObjectCollection.create()
             for i in range(setup.operations.count):
                 ops.add(setup.operations.item(i))
-            future = cam.generateToolpath(ops)
-            _wait_for_toolpath(future)
-            return {"generated": True, "scope": "setup", "setup": setup_name}
+            cam.generateToolpath(ops)
+            adsk.doEvents()
+            return {"generation_started": True, "scope": "setup", "setup": setup_name, "note": note}
 
         raise RuntimeError("Provide setup_name, operation_name, or generate_all=true")
 
