@@ -14,7 +14,7 @@ Fix bugs in faust-machines/fusion360-mcp-server as Step 1 of a larger research p
 ## Stack
 - **LLM**: Qwen3-8B served via vLLM 0.9.0 on TACC Lonestar6 (1x A100 40GB, gpu-a100-small)
 - **Serving**: Apptainer (vllm-new.sif), hermes tool call parser, qwen3 reasoning parser, tunneled to localhost:8000
-- **Middleware**: C:\Users\Nanja\fusion_middleware.py (Python, bridges LLM ↔ MCP server)
+- **Middleware**: `fusion_middleware.py` in user home directory (Python, bridges LLM ↔ MCP server)
 - **MCP Server**: faust-machines/fusion360-mcp-server (this repo)
 - **Add-in**: Fusion360MCP add-in running inside Fusion 360, TCP :9876
 - **Editor**: VS Code on Windows
