@@ -272,7 +272,10 @@ class CommandHandler:
     # ------------------------------------------------------------------
 
     def _design(self):
-        d = self.app.activeProduct
+        doc = self.app.activeDocument
+        if doc is None:
+            raise RuntimeError("No active document")
+        d = doc.products.itemByProductType("DesignProductType")
         if d is None:
             raise RuntimeError("No active design")
         return d
