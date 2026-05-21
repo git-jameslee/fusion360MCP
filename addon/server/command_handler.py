@@ -2647,10 +2647,28 @@ class CommandHandler:
         spindle_speed: float = None,
         coolant: str = "flood",
     ):
+        _STRATEGY_MAP = {
+            "face":          "face",
+            "2d_adaptive":   "adaptive2d",
+            "2d_contour":    "contour2d",
+            "2d_pocket":     "pocket2d",
+            "3d_adaptive":   "adaptive",
+            "3d_scallop":    "scallop",
+            "3d_parallel":   "parallel",
+            "drilling":      "drill",
+            "bore":          "bore",
+            "thread_milling": "thread",
+            "slot":          "slot",
+            "trace":         "trace",
+            "engrave":       "engrave",
+            "ramp":          "ramp",
+        }
+        fusion_strategy = _STRATEGY_MAP.get(strategy, strategy)
+
         cam = self._get_cam()
         setup = self._find_setup(cam, setup_name)
 
-        op_input = setup.operations.createInput(strategy)
+        op_input = setup.operations.createInput(fusion_strategy)
         if name:
             op_input.name = name
         if tool_diameter:
