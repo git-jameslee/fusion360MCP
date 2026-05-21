@@ -57,6 +57,18 @@ _RULES: list[tuple[str, str, list[str]]] = [
         ],
     ),
     (
+        r"FILLET_NO_EDGE_FOUND|no fillet edge found",
+        "FILLET_NO_EDGE_FOUND",
+        [
+            "No sharp edges were found to fillet — the body's edges are already "
+            "smooth/tangent (from a prior fillet or chamfer).",
+            "To change an existing fillet radius: call undo to remove the prior "
+            "fillet, then re-apply fillet with the new radius.",
+            "Do NOT create a new sketch/extrude; just undo and re-fillet the "
+            "existing body.",
+        ],
+    ),
+    (
         r"regenerat(e|ion) fail|feature\s+fail(ed|ure)|rebuild fail",
         "REGEN_FAILED",
         [

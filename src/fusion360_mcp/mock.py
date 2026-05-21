@@ -228,7 +228,7 @@ def _boolean_operation(p: dict) -> dict:
 
 
 def _delete_all(_p: dict) -> dict:
-    return {"deleted": True}
+    return {"deleted": True, "bodies_remaining": 0, "items_deleted": 0, "items_failed": 0}
 
 
 def _undo(_p: dict) -> dict:

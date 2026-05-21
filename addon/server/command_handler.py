@@ -268,6 +268,16 @@ class CommandHandler:
     def _root(self):
         return self._design().rootComponent
 
+    def _require_parametric(self):
+        """Raise if the design is in direct modeling mode."""
+        design = self._design()
+        if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+            raise RuntimeError(
+                "This tool requires parametric mode. "
+                "Call set_design_type('parametric') first, or use "
+                "'Capture Design History' in the Fusion UI."
+            )
+
     def _last_sketch(self):
         root = self._root()
         if root.sketches.count == 0:
@@ -346,31 +356,56 @@ class CommandHandler:
             )
         return t
 
+    @staticmethod
+    def _is_tangent_edge(edge) -> bool:
+        """Return True if the two faces meeting at *edge* are tangent (smooth seam).
+
+        Tangent seam edges — created by prior fillets/chamfers — cannot be
+        filleted again and should be excluded from edge selections.
+        """
+        if edge.faces.count != 2:
+            return False
+        pt = edge.pointOnEdge
+        ok1, n1 = edge.faces.item(0).evaluator.getNormalAtPoint(pt)
+        ok2, n2 = edge.faces.item(1).evaluator.getNormalAtPoint(pt)
+        if not (ok1 and ok2):
+            return False
+        dot = abs(n1.x * n2.x + n1.y * n2.y + n1.z * n2.z)
+        return dot > 0.9994  # ~2° threshold
+
     def _select_edges(self, body, selection: str):
         """Return an ObjectCollection of edges based on *selection*."""
         coll = adsk.core.ObjectCollection.create()
         bbox = body.boundingBox
+        edge_count = body.edges.count
 
         if selection == "all":
-            for edge in body.edges:
-                coll.add(edge)
+            for i in range(edge_count):
+                edge = body.edges.item(i)
+                if not self._is_tangent_edge(edge):
+                    coll.add(edge)
         elif selection == "top":
             threshold = bbox.maxPoint.z - 0.001
-            for edge in body.edges:
-                mid = edge.pointOnEdge
-                if mid.z > threshold:
+            for i in range(edge_count):
+                edge = body.edges.item(i)
+                if edge.pointOnEdge.z > threshold and not self._is_tangent_edge(edge):
                     coll.add(edge)
         elif selection == "bottom":
             threshold = bbox.minPoint.z + 0.001
-            for edge in body.edges:
-                mid = edge.pointOnEdge
-                if mid.z < threshold:
+            for i in range(edge_count):
+                edge = body.edges.item(i)
+                if edge.pointOnEdge.z < threshold and not self._is_tangent_edge(edge):
                     coll.add(edge)
         elif selection == "vertical":
-            for edge in body.edges:
+            for i in range(edge_count):
+                edge = body.edges.item(i)
                 sp = edge.startVertex.geometry
                 ep = edge.endVertex.geometry
-                if abs(sp.x - ep.x) < 0.001 and abs(sp.y - ep.y) < 0.001:
+                if (
+                    abs(sp.x - ep.x) < 0.001
+                    and abs(sp.y - ep.y) < 0.001
+                    and not self._is_tangent_edge(edge)
+                ):
                     coll.add(edge)
         else:
             raise RuntimeError(
@@ -385,23 +420,26 @@ class CommandHandler:
         """Return an ObjectCollection of faces based on *selection*."""
         coll = adsk.core.ObjectCollection.create()
         bbox = body.boundingBox
+        face_count = body.faces.count
 
         if selection == "all":
-            for face in body.faces:
-                coll.add(face)
+            for i in range(face_count):
+                coll.add(body.faces.item(i))
         elif selection == "top":
             threshold = bbox.maxPoint.z - 0.001
-            for face in body.faces:
+            for i in range(face_count):
+                face = body.faces.item(i)
                 if face.boundingBox.maxPoint.z > threshold:
                     coll.add(face)
         elif selection == "bottom":
             threshold = bbox.minPoint.z + 0.001
-            for face in body.faces:
+            for i in range(face_count):
+                face = body.faces.item(i)
                 if face.boundingBox.minPoint.z < threshold:
                     coll.add(face)
         elif selection == "vertical":
-            for face in body.faces:
-                # Check if face normal is roughly horizontal (vertical face)
+            for i in range(face_count):
+                face = body.faces.item(i)
                 try:
                     _, normal_vec = face.evaluator.getNormalAtPoint(face.pointOnFace)
                     if abs(normal_vec.z) < 0.1:
@@ -807,6 +845,7 @@ class CommandHandler:
         operation: str = "new_body",
         direction: str = "positive",
     ):
+        self._require_parametric()
         root = self._root()
         sketch = self._last_sketch()
         if sketch.profiles.count == 0:
@@ -822,8 +861,16 @@ class CommandHandler:
             ext_input.setDistanceExtent(direction == "negative", dist)
 
         feat = ext_feats.add(ext_input)
+
+        body_name = None
+        if operation == "new_body" and feat.bodies.count > 0:
+            body = feat.bodies.item(0)
+            body.name = feat.name
+            body_name = feat.name
+
         return {
             "feature_name": feat.name,
+            "body_name": body_name,
             "height": height,
             "operation": operation,
             "direction": direction,
@@ -935,6 +982,7 @@ class CommandHandler:
         body_index: int = 0,
         edge_selection: str = "all",
     ):
+        self._require_parametric()
         root = self._root()
         body = (
             self._body_by_name(body_name)
@@ -1686,14 +1734,59 @@ class CommandHandler:
 
     def delete_all(self):
         design = self._design()
-        if hasattr(design, "timeline") and design.timeline.count > 0:
+        root = self._root()
+        deleted = 0
+        failed = 0
+
+        is_parametric = (
+            design.designType == adsk.fusion.DesignTypes.ParametricDesignType
+        )
+
+        if is_parametric and hasattr(design, "timeline") and design.timeline is not None:
             tl = design.timeline
-            for i in range(tl.count - 1, -1, -1):
+            # Snapshot count — iterate in reverse so earlier indices stay valid
+            # as entities are removed.
+            count = tl.count
+            for i in range(count - 1, -1, -1):
                 try:
-                    tl.item(i).deleteMe()
+                    entity = tl.item(i).entity
+                    if entity is not None:
+                        entity.deleteMe()
+                        deleted += 1
+                        adsk.doEvents()
                 except Exception:
-                    pass
-        return {"deleted": True}
+                    failed += 1
+
+        # Direct-mode designs have no timeline; delete bodies directly.
+        # Also used as a fallback when timeline deletion left bodies behind.
+        remaining_bodies = root.bRepBodies.count
+        if remaining_bodies > 0:
+            for i in range(remaining_bodies - 1, -1, -1):
+                try:
+                    root.bRepBodies.item(i).deleteMe()
+                    deleted += 1
+                    adsk.doEvents()
+                except Exception:
+                    failed += 1
+
+        # Delete any remaining sketches directly.
+        remaining_sketches = root.sketches.count
+        if remaining_sketches > 0:
+            for i in range(remaining_sketches - 1, -1, -1):
+                try:
+                    root.sketches.item(i).deleteMe()
+                    deleted += 1
+                    adsk.doEvents()
+                except Exception:
+                    failed += 1
+
+        bodies_after = root.bRepBodies.count
+        return {
+            "deleted": bodies_after == 0,
+            "bodies_remaining": bodies_after,
+            "items_deleted": deleted,
+            "items_failed": failed,
+        }
 
     def undo(self):
         design = self._design()
