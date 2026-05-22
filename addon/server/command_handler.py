@@ -216,6 +216,9 @@ class CommandHandler:
                 "cam_get_library_tools": self.cam_get_library_tools,
                 "cam_update_setup_machine_params": self.cam_update_setup_machine_params,
                 "cam_get_nc_programs": self.cam_get_nc_programs,
+                "cam_set_operation_geometry": self.cam_set_operation_geometry,
+                "cam_set_operation_tool": self.cam_set_operation_tool,
+                "cam_create_document_tool": self.cam_create_document_tool,
                 # health
                 "ping": self.ping,
                 # design type safety
@@ -2686,29 +2689,61 @@ class CommandHandler:
         setup_name: str = None,
         operation_name: str = None,
         generate_all: bool = False,
+        timeout_seconds: int = 120,
     ):
         cam = self._get_cam()
 
-        # Toolpath generation runs in Fusion's background and can take minutes.
-        # We start it and return immediately to avoid TCP bridge timeout.
-        # The caller should poll with cam_get_toolpath_status to confirm completion.
-        note = "Generation started. Call cam_get_toolpath_status to verify completion."
+        def _poll_future(future, scope_label):
+            """Poll GenerateToolpathFuture until done or timeout."""
+            import time as _time
+            deadline = _time.monotonic() + timeout_seconds
+            while not future.isGenerationCompleted:
+                if _time.monotonic() > deadline:
+                    return {
+                        "completed": False,
+                        "timed_out": True,
+                        "note": (
+                            f"Generation still running after {timeout_seconds}s. "
+                            "Call cam_get_toolpath_status to check later."
+                        ),
+                    }
+                adsk.doEvents()
+                _time.sleep(0.5)
+            # Try to surface any error message from the future
+            error_msg = None
+            for attr in ("error", "errorMessage", "message", "errorDescription"):
+                try:
+                    v = getattr(future, attr, None)
+                    if v:
+                        error_msg = str(v)
+                        break
+                except Exception:
+                    pass
+            out = {"completed": True, "timed_out": False}
+            if error_msg:
+                out["generation_error"] = error_msg
+            return out
 
         if generate_all:
-            cam.generateAllToolpaths(False)
-            adsk.doEvents()
-            return {"generation_started": True, "scope": "all", "note": note}
+            future = cam.generateAllToolpaths(False)
+            poll = _poll_future(future, "all")
+            return {"scope": "all", **poll}
 
         if operation_name and setup_name:
             setup = self._find_setup(cam, setup_name)
-            op = self._find_operation(setup, operation_name)
-            cam.generateToolpath(op)
-            adsk.doEvents()
+            op = self._find_operation_all(setup, operation_name)
+            ops = adsk.core.ObjectCollection.create()
+            ops.add(op)
+            future = cam.generateToolpath(ops)
+            poll = _poll_future(future, operation_name)
+            has_tp = self._safe_cam_attr(op, "hasToolpath", False)
+            valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
             return {
-                "generation_started": True,
                 "scope": "operation",
                 "operation": operation_name,
-                "note": note,
+                "has_toolpath": has_tp,
+                "is_valid": valid,
+                **poll,
             }
 
         if setup_name:
@@ -2716,9 +2751,9 @@ class CommandHandler:
             ops = adsk.core.ObjectCollection.create()
             for i in range(setup.operations.count):
                 ops.add(setup.operations.item(i))
-            cam.generateToolpath(ops)
-            adsk.doEvents()
-            return {"generation_started": True, "scope": "setup", "setup": setup_name, "note": note}
+            future = cam.generateToolpath(ops)
+            poll = _poll_future(future, setup_name)
+            return {"scope": "setup", "setup": setup_name, **poll}
 
         raise RuntimeError("Provide setup_name, operation_name, or generate_all=true")
 
@@ -2842,7 +2877,7 @@ class CommandHandler:
 
     # ── 1. cam_get_toolpath_status ─────────────────────────────────────
 
-    def cam_get_toolpath_status(self, setup_name: str = None):
+    def cam_get_toolpath_status(self, setup_name: str = None, operation_name: str = None):
         cam = self._get_cam()
 
         if setup_name:
@@ -2854,6 +2889,8 @@ class CommandHandler:
         for setup in setups:
             ops = []
             for op in self._safe_cam_iter(setup.allOperations):
+                if operation_name and op.name != operation_name:
+                    continue
                 has_tp = self._safe_cam_attr(op, "hasToolpath", False)
                 valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
                 ops.append({
@@ -2940,6 +2977,7 @@ class CommandHandler:
 
     # Maps user-friendly keys → (fusion_param_name, expression_unit_suffix)
     _OP_PARAM_MAP = {
+        "tool_diameter_mm":       ("tool_diameter",              "mm"),
         "cutting_feedrate_mmpm":  ("tool_feedCutting",          "mm/min"),
         "entry_feedrate_mmpm":    ("tool_feedEntry",             "mm/min"),
         "exit_feedrate_mmpm":     ("tool_feedExit",              "mm/min"),
@@ -2947,9 +2985,12 @@ class CommandHandler:
         "ramp_feedrate_mmpm":     ("tool_feedRamp",              "mm/min"),
         "reduced_feedrate_mmpm":  ("tool_feedReducedCutting",    "mm/min"),
         "spindle_speed_rpm":      ("tool_spindleSpeed",          "rpm"),
+        # Stepover: 2D ops use "stepover", 2D Adaptive uses "optimalLoad"
         "stepover_mm":            ("stepover",                   "mm"),
-        "stepdown_mm":            ("stepdown",                   "mm"),
         "optimal_load_mm":        ("optimalLoad",                "mm"),
+        # Stepdown names vary by strategy — try both via alias below
+        "stepdown_mm":            ("stepdown",                   "mm"),
+        "max_stepdown_mm":        ("maximumStepdown",            "mm"),
         "tolerance_mm":           ("tolerance",                  "mm"),
         "stock_to_leave_mm":      ("stockToLeave",               "mm"),
         "axial_stock_mm":         ("axialStock",                 "mm"),
@@ -3124,50 +3165,80 @@ class CommandHandler:
     def cam_get_library_tools(self, library_name: str = None):
         cam = self._get_cam()
 
+        # Document library — always available
+        doc_tools = []
+        try:
+            for i in range(cam.documentToolLibrary.count):
+                try:
+                    doc_tools.append(
+                        self._extract_tool_record(cam.documentToolLibrary.item(i))
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        results = []
+        if doc_tools:
+            results.append({
+                "location": "document",
+                "url": "document",
+                "tool_count": len(doc_tools),
+                "tools": doc_tools,
+            })
+
+        # External libraries via libraryManager (not available in all API versions)
         try:
             lib_mgr = cam.libraryManager
             tool_libs = lib_mgr.toolLibraries
-        except Exception as e:
-            raise RuntimeError(f"Cannot access CAM library manager: {e}")
-
-        results = []
-        locations = ["local", "fusion360", "cloud"]
-
-        for loc in locations:
-            try:
-                urls = tool_libs.urlsByLocation(
-                    getattr(adsk.cam.LibraryLocations,
-                            f"{loc.capitalize()}LibraryLocation", None)
-                    or adsk.cam.LibraryLocations.LocalLibraryLocation
-                )
-            except Exception:
-                continue
-
-            for i in range(urls.count):
+            loc_map = {
+                "local": getattr(adsk.cam.LibraryLocations, "LocalLibraryLocation", None),
+                "fusion360": getattr(adsk.cam.LibraryLocations, "Fusion360LibraryLocation", None),
+                "cloud": getattr(adsk.cam.LibraryLocations, "CloudLibraryLocation", None),
+            }
+            for loc, loc_enum in loc_map.items():
+                if loc_enum is None:
+                    continue
                 try:
-                    url = urls.item(i)
-                    url_str = str(url)
-                    if library_name and library_name.lower() not in url_str.lower():
-                        continue
-                    lib = tool_libs.toolLibraryAtURL(url)
-                    if not lib:
-                        continue
-                    tools = []
-                    for tool in self._safe_cam_iter(lib):
-                        try:
-                            tools.append(self._extract_tool_record(tool))
-                        except Exception:
-                            pass
-                    results.append({
-                        "location": loc,
-                        "url": url_str,
-                        "tool_count": len(tools),
-                        "tools": tools,
-                    })
+                    urls = tool_libs.urlsByLocation(loc_enum)
                 except Exception:
                     continue
+                for i in range(urls.count):
+                    try:
+                        url = urls.item(i)
+                        url_str = str(url)
+                        if library_name and library_name.lower() not in url_str.lower():
+                            continue
+                        lib = tool_libs.toolLibraryAtURL(url)
+                        if not lib:
+                            continue
+                        tools = []
+                        for tool in self._safe_cam_iter(lib):
+                            try:
+                                tools.append(self._extract_tool_record(tool))
+                            except Exception:
+                                pass
+                        results.append({
+                            "location": loc,
+                            "url": url_str,
+                            "tool_count": len(tools),
+                            "tools": tools,
+                        })
+                    except Exception:
+                        continue
+        except Exception:
+            # libraryManager not available in this Fusion API version
+            pass
 
-        return {"libraries": results, "library_count": len(results)}
+        note = (
+            None if results else
+            "Document tool library is empty and no external libraries are accessible. "
+            "Use cam_create_document_tool to add a tool to the document library."
+        )
+        out = {"libraries": results, "library_count": len(results)}
+        if note:
+            out["note"] = note
+        return out
 
     # ── 7. cam_update_setup_machine_params ────────────────────────────
 
@@ -3290,6 +3361,378 @@ class CommandHandler:
 
     # ------------------------------------------------------------------
     # Health check
+    # ── 9. cam_set_operation_geometry ─────────────────────────────────
+
+    # Parameter names that hold the machining model geometry, by priority.
+    # Different strategies use different param names for the same concept.
+    _MODEL_PARAM_NAMES = (
+        "pockets",           # 2D Adaptive, 2D Pocket
+        "model",             # 3D Adaptive, Scallop, etc.
+        "stockContours",     # stock boundary contours
+        "machiningBoundary", # some 3D ops
+        "silhouette",        # silhouette-based ops
+        "tool_frame",        # misc
+    )
+
+    def cam_set_operation_geometry(
+        self,
+        setup_name: str,
+        operation_name: str,
+        body_index: int = 0,
+        body_name: str = None,
+        face_indices: list = None,
+    ):
+        """Assign model geometry (body faces) to a CAM operation's model parameter.
+
+        Selects all faces of the target body by default, equivalent to clicking
+        the body in the Fusion UI geometry selection dialog.
+        """
+        cam = self._get_cam()
+        setup = self._find_setup(cam, setup_name)
+        op = self._find_operation_all(setup, operation_name)
+
+        # ── Collect bodies from design root component ──────────────────
+        # Most CAM setups reference design bodies directly; manufacturing
+        # models (cam.manufacturingModels) are an explicit opt-in feature.
+        bodies = []
+        try:
+            doc = self.app.activeDocument
+            design_product = None
+            for i in range(doc.products.count):
+                p = doc.products.item(i)
+                if p.productType == "DesignProductType":
+                    import adsk.fusion
+                    design_product = adsk.fusion.Design.cast(p)
+                    break
+            if design_product:
+                root = design_product.rootComponent
+                for i in range(root.bRepBodies.count):
+                    bodies.append(root.bRepBodies.item(i))
+                # Also search immediate sub-occurrences (assemblies)
+                for oi in range(root.occurrences.count):
+                    occ = root.occurrences.item(oi)
+                    for bi in range(occ.bRepBodies.count):
+                        bodies.append(occ.bRepBodies.item(bi))
+        except Exception:
+            pass
+
+        if not bodies:
+            raise RuntimeError(
+                "No solid bodies found in the design. "
+                "Make sure the design has at least one body."
+            )
+
+        # ── Select target body ─────────────────────────────────────────
+        target_body = None
+        if body_name:
+            for b in bodies:
+                if b.name == body_name:
+                    target_body = b
+                    break
+            if target_body is None:
+                available = [b.name for b in bodies]
+                raise RuntimeError(
+                    f"Body '{body_name}' not found. Available: {available}"
+                )
+        else:
+            if body_index >= len(bodies):
+                raise RuntimeError(
+                    f"body_index {body_index} out of range "
+                    f"(found {len(bodies)} bodies)"
+                )
+            target_body = bodies[body_index]
+
+        # ── Collect faces ──────────────────────────────────────────────
+        if face_indices is not None:
+            faces = []
+            for fi in face_indices:
+                if fi >= target_body.faces.count:
+                    raise RuntimeError(
+                        f"face_index {fi} out of range "
+                        f"(body has {target_body.faces.count} faces)"
+                    )
+                faces.append(target_body.faces.item(fi))
+        else:
+            # All faces of the body — equivalent to clicking the body in the UI
+            faces = [target_body.faces.item(i) for i in range(target_body.faces.count)]
+
+        # ── Assign to operation geometry parameter ─────────────────────
+        param_used = None
+        for param_name in self._MODEL_PARAM_NAMES:
+            try:
+                p = op.parameters.itemByName(param_name)
+                if p is None:
+                    continue
+                geom = p.value  # CadObjectParameterValue
+                if geom is None:
+                    continue
+                geom.value = faces
+                param_used = param_name
+                break
+            except Exception:
+                continue
+
+        if param_used is None:
+            # Enumerate all parameter names on this operation for diagnostics
+            all_params = []
+            try:
+                params_list = op.parameters
+                for i in range(params_list.count):
+                    try:
+                        p = params_list.item(i)
+                        all_params.append(p.name)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Could not find a writable geometry parameter on operation "
+                f"'{operation_name}'. Tried: {list(self._MODEL_PARAM_NAMES)}. "
+                f"All available parameters: {all_params}"
+            )
+
+        return {
+            "success": True,
+            "setup": setup_name,
+            "operation": operation_name,
+            "body": target_body.name,
+            "param_used": param_used,
+            "face_count": len(faces),
+            "note": (
+                "Geometry assigned. Toolpath is now outdated — "
+                "call cam_generate_toolpath to regenerate."
+            ),
+        }
+
+    # ── 10. cam_set_operation_tool ────────────────────────────────────
+
+    def cam_set_operation_tool(
+        self,
+        setup_name: str,
+        operation_name: str,
+        tool_number: int = None,
+        tool_description: str = None,
+    ):
+        """Assign a tool to a CAM operation, searching all available libraries."""
+        if tool_number is None and tool_description is None:
+            raise ValueError(
+                "Provide at least one of: tool_number, tool_description"
+            )
+
+        cam = self._get_cam()
+        setup = self._find_setup(cam, setup_name)
+        op = self._find_operation_all(setup, operation_name)
+
+        def _tool_number(t):
+            # Tool.number may be a direct attr or live in parameters
+            try:
+                n = t.number
+                if n is not None:
+                    return int(n)
+            except Exception:
+                pass
+            try:
+                n = self._read_cam_param(t.parameters, "tool_number")
+                if n is not None:
+                    return int(n)
+            except Exception:
+                pass
+            return None
+
+        def _tool_description(t):
+            try:
+                d = t.description
+                if d is not None:
+                    return str(d)
+            except Exception:
+                pass
+            return ""
+
+        def _matches(t):
+            if tool_number is not None:
+                if _tool_number(t) == tool_number:
+                    return True
+            if tool_description is not None:
+                if tool_description.lower() in _tool_description(t).lower():
+                    return True
+            return False
+
+        matched_tool = None
+        library_source = None
+
+        # 1. Document library (fastest, always checked first)
+        tool_lib = cam.documentToolLibrary
+        for i in range(tool_lib.count):
+            try:
+                t = tool_lib.item(i)
+                if _matches(t):
+                    matched_tool = t
+                    library_source = "document"
+                    break
+            except Exception:
+                continue
+
+        if matched_tool is None:
+            criteria = (
+                f"tool_number={tool_number}"
+                if tool_number is not None
+                else f"tool_description='{tool_description}'"
+            )
+            raise RuntimeError(
+                f"No tool matching {criteria} in the document library "
+                f"(library has {tool_lib.count} tools). "
+                f"Use cam_create_document_tool to add a tool first."
+            )
+
+        # Direct assignment
+        try:
+            op.tool = matched_tool
+        except Exception:
+            # Fallback: set tool_number parameter directly
+            p = op.parameters.itemByName("tool_number")
+            num = _tool_number(matched_tool)
+            if p is not None and num is not None:
+                p.expression = str(num)
+            else:
+                raise RuntimeError(
+                    "Could not assign tool: op.tool is read-only and "
+                    "no 'tool_number' parameter found on the operation."
+                )
+
+        assigned_num = _tool_number(matched_tool)
+        assigned_desc = _tool_description(matched_tool)
+        try:
+            diameter_cm = self._read_cam_param(
+                matched_tool.parameters, "tool_diameter"
+            )
+            diameter_mm = round(diameter_cm * 10.0, 4) if diameter_cm else None
+        except Exception:
+            diameter_mm = None
+
+        result = {
+            "success": True,
+            "operation": operation_name,
+            "library_source": library_source,
+            "tool_assigned": {
+                "number": assigned_num,
+                "description": assigned_desc,
+            },
+        }
+        if diameter_mm is not None:
+            result["tool_assigned"]["diameter_mm"] = diameter_mm
+        return result
+
+    # ── 11. cam_create_document_tool ─────────────────────────────────
+
+    # Map MCP tool_type strings to Fusion CAM JSON type strings
+    _TOOL_TYPE_JSON = {
+        "flat_end_mill": "flat end mill",
+        "ball_end_mill": "ball end mill",
+        "bull_nose":     "bull nose end mill",
+        "drill":         "drill",
+        "chamfer":       "chamfer mill",
+    }
+
+    def cam_create_document_tool(
+        self,
+        tool_number: int = 1,
+        description: str = "Flat End Mill",
+        tool_type: str = "flat_end_mill",
+        diameter_mm: float = 6.0,
+        flute_length_mm: float = 15.0,
+        overall_length_mm: float = 50.0,
+        number_of_flutes: int = 4,
+        corner_radius_mm: float = 0.0,
+    ):
+        """Create a tool in the document tool library via JSON factory API."""
+        import json as _json
+        import uuid as _uuid
+
+        cam = self._get_cam()
+        tool_lib = cam.documentToolLibrary
+
+        type_str = self._TOOL_TYPE_JSON.get(tool_type, "flat end mill")
+        tool_data = {
+            "type": type_str,
+            "unit": "millimeters",
+            "description": description,
+            "guid": "{" + str(_uuid.uuid4()) + "}",
+            "product-id": f"mcp-tool-{tool_number}",
+            "BMC": "carbide",
+            "number": tool_number,
+            "DC": diameter_mm,
+            "LCF": flute_length_mm,
+            "OAL": overall_length_mm,
+            "ZEFF": number_of_flutes,
+            "NOF": number_of_flutes,
+            "RE": corner_radius_mm,
+            "APMX": diameter_mm,
+            "RPMF": 0,
+            "fz": 0.0,
+        }
+
+        tool_obj = None
+        method_used = None
+        errors = []
+
+        # Approach A: Tool.createFromJson (single-tool JSON)
+        for factory in (
+            getattr(adsk.cam.Tool, "createFromJson", None),
+            getattr(adsk.cam, "Tool_createFromJson", None),
+        ):
+            if factory is None:
+                continue
+            try:
+                t = factory(_json.dumps(tool_data))
+                if t is not None:
+                    tool_obj = t
+                    method_used = "Tool.createFromJson"
+                    break
+            except Exception as e:
+                errors.append(f"Tool.createFromJson: {e}")
+
+        # Approach B: ToolLibrary.createFromJson (full library JSON),
+        # then read first tool out and add it to the document library.
+        if tool_obj is None:
+            lib_json = _json.dumps({"data": [tool_data], "version": 1})
+            for factory in (
+                getattr(adsk.cam.ToolLibrary, "createFromJson", None),
+                getattr(adsk.cam, "ToolLibrary_createFromJson", None),
+            ):
+                if factory is None:
+                    continue
+                try:
+                    tmp_lib = factory(lib_json)
+                    if tmp_lib and tmp_lib.count > 0:
+                        tool_obj = tmp_lib.item(0)
+                        method_used = "ToolLibrary.createFromJson"
+                        break
+                except Exception as e:
+                    errors.append(f"ToolLibrary.createFromJson: {e}")
+
+        if tool_obj is None:
+            raise RuntimeError(
+                f"All tool creation approaches failed. Errors: {errors}. "
+                f"Document library add() methods: "
+                f"{[m for m in dir(tool_lib) if not m.startswith('_')]}"
+            )
+
+        # Add to document library
+        add_result = tool_lib.add(tool_obj)
+
+        return {
+            "success": True,
+            "tool_number": tool_number,
+            "description": description,
+            "tool_type": tool_type,
+            "type_str": type_str,
+            "method_used": method_used,
+            "add_result": str(add_result),
+            "diameter_mm": diameter_mm,
+            "document_library_count": tool_lib.count,
+            "errors": errors if errors else None,
+        }
+
     # ------------------------------------------------------------------
 
     def ping(self):

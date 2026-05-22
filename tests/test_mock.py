@@ -903,6 +903,73 @@ class TestMockCAM:
         assert "nc_programs" in result
         assert "count" in result
 
+    def test_cam_set_operation_geometry_defaults(self):
+        result = mock_command(
+            "cam_set_operation_geometry",
+            {"setup_name": "Setup1", "operation_name": "Adaptive1"},
+        )
+        assert result["success"] is True
+        assert result["setup"] == "Setup1"
+        assert result["operation"] == "Adaptive1"
+        assert "param_used" in result
+        assert "face_count" in result
+        assert "note" in result
+
+    def test_cam_set_operation_geometry_by_name(self):
+        result = mock_command(
+            "cam_set_operation_geometry",
+            {
+                "setup_name": "Setup1",
+                "operation_name": "Adaptive1",
+                "body_name": "Stock",
+            },
+        )
+        assert result["success"] is True
+
+    def test_cam_create_document_tool_defaults(self):
+        result = mock_command("cam_create_document_tool", {})
+        assert result["success"] is True
+        assert result["tool_number"] == 1
+        assert result["diameter_mm"] == 6.0
+        assert result["document_library_count"] >= 1
+
+    def test_cam_create_document_tool_custom(self):
+        result = mock_command(
+            "cam_create_document_tool",
+            {
+                "tool_number": 3,
+                "description": "10mm Ball End Mill",
+                "tool_type": "ball_end_mill",
+                "diameter_mm": 10.0,
+            },
+        )
+        assert result["success"] is True
+        assert result["tool_number"] == 3
+        assert result["diameter_mm"] == 10.0
+
+    def test_cam_set_operation_tool_by_number(self):
+        result = mock_command(
+            "cam_set_operation_tool",
+            {"setup_name": "Setup1", "operation_name": "Adaptive1", "tool_number": 3},
+        )
+        assert result["success"] is True
+        assert result["operation"] == "Adaptive1"
+        assert result["tool_assigned"]["number"] == 3
+        assert "description" in result["tool_assigned"]
+        assert "diameter_mm" in result["tool_assigned"]
+
+    def test_cam_set_operation_tool_by_description(self):
+        result = mock_command(
+            "cam_set_operation_tool",
+            {
+                "setup_name": "Setup1",
+                "operation_name": "Adaptive1",
+                "tool_description": "End Mill",
+            },
+        )
+        assert result["success"] is True
+        assert "tool_assigned" in result
+
 
 class TestMockDesignTypeSafety:
     def test_get_design_type(self):

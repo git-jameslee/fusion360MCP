@@ -985,6 +985,48 @@ def _cam_get_nc_programs(_p: dict) -> dict:
     }
 
 
+def _cam_create_document_tool(p: dict) -> dict:
+    return {
+        "success": True,
+        "tool_number": p.get("tool_number", 1),
+        "description": p.get("description", "Flat End Mill"),
+        "tool_type": p.get("tool_type", "flat_end_mill"),
+        "diameter_mm": p.get("diameter_mm", 6.0),
+        "document_library_count": 1,
+    }
+
+
+def _cam_set_operation_tool(p: dict) -> dict:
+    tool_number = p.get("tool_number", 1)
+    tool_description = p.get("tool_description", "6mm Flat End Mill")
+    return {
+        "success": True,
+        "operation": p.get("operation_name", "Adaptive1"),
+        "tool_assigned": {
+            "number": tool_number,
+            "description": (
+                tool_description if p.get("tool_description") else "6mm Flat End Mill"
+            ),
+            "diameter_mm": 6.0,
+        },
+    }
+
+
+def _cam_set_operation_geometry(p: dict) -> dict:
+    return {
+        "success": True,
+        "setup": p.get("setup_name", "Setup1"),
+        "operation": p.get("operation_name", "Adaptive1"),
+        "body": "Body1",
+        "param_used": "model",
+        "face_count": 6,
+        "note": (
+            "Geometry assigned. Toolpath is now outdated — "
+            "call cam_generate_toolpath to regenerate."
+        ),
+    }
+
+
 # ── perception (viewport render) ─────────────────────────────────────
 
 # 1x1 transparent PNG, enough to exercise the image-content code path.
@@ -1120,6 +1162,9 @@ _DISPATCH: dict[str, Any] = {
     "cam_get_library_tools": _cam_get_library_tools,
     "cam_update_setup_machine_params": _cam_update_setup_machine_params,
     "cam_get_nc_programs": _cam_get_nc_programs,
+    "cam_set_operation_geometry": _cam_set_operation_geometry,
+    "cam_create_document_tool": _cam_create_document_tool,
+    "cam_set_operation_tool": _cam_set_operation_tool,
     # design type safety
     "get_design_type": _get_design_type,
     "set_design_type": _set_design_type,

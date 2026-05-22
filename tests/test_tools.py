@@ -174,6 +174,9 @@ def test_expected_tools_present():
         "cam_get_library_tools",
         "cam_update_setup_machine_params",
         "cam_get_nc_programs",
+        "cam_set_operation_geometry",
+        "cam_create_document_tool",
+        "cam_set_operation_tool",
         # design type safety
         "get_design_type",
         "set_design_type",

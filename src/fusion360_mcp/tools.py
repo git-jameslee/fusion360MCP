@@ -2154,6 +2154,13 @@ TOOLS: list[dict] = [
                     "type": "string",
                     "description": "Filter to a specific setup (omit for all setups)",
                 },
+                "operation_name": {
+                    "type": "string",
+                    "description": (
+                        "Filter to a specific operation within the setup "
+                        "(omit for all operations)"
+                    ),
+                },
             },
         },
     },
@@ -2178,11 +2185,13 @@ TOOLS: list[dict] = [
         "name": "cam_update_operation_parameters",
         "title": "Update CAM Operation Parameters",
         "description": (
-            "Write feeds, speeds, and engagement parameters to a CAM operation. "
-            "Accepts any subset of: cutting_feedrate_mmpm, entry_feedrate_mmpm, "
-            "exit_feedrate_mmpm, plunge_feedrate_mmpm, ramp_feedrate_mmpm, "
-            "reduced_feedrate_mmpm, spindle_speed_rpm, stepover_mm, stepdown_mm, "
-            "optimal_load_mm, tolerance_mm, stock_to_leave_mm, axial_stock_mm. "
+            "Write tool geometry, feeds, speeds, and engagement parameters to a "
+            "CAM operation. No tool library needed — Fusion generates toolpaths "
+            "from inline parameters. Accepts any subset of: tool_diameter_mm, "
+            "cutting_feedrate_mmpm, entry_feedrate_mmpm, exit_feedrate_mmpm, "
+            "plunge_feedrate_mmpm, ramp_feedrate_mmpm, reduced_feedrate_mmpm, "
+            "spindle_speed_rpm, stepover_mm, stepdown_mm, optimal_load_mm, "
+            "tolerance_mm, stock_to_leave_mm, axial_stock_mm. "
             "Does NOT auto-generate toolpaths — call cam_generate_toolpath after."
         ),
         "inputSchema": {
@@ -2195,8 +2204,10 @@ TOOLS: list[dict] = [
                     "type": "object",
                     "description": (
                         "Key/value pairs to update. "
-                        "Keys: cutting_feedrate_mmpm, spindle_speed_rpm, "
-                        "stepover_mm, stepdown_mm, tolerance_mm, etc."
+                        "Keys: tool_diameter_mm, cutting_feedrate_mmpm, "
+                        "spindle_speed_rpm, stepover_mm, optimal_load_mm "
+                        "(2D Adaptive radial engagement), stepdown_mm, "
+                        "max_stepdown_mm, tolerance_mm, etc."
                     ),
                     "additionalProperties": {"type": "number"},
                 },
@@ -2290,6 +2301,161 @@ TOOLS: list[dict] = [
         "inputSchema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "cam_set_operation_geometry",
+        "title": "Set Operation Geometry",
+        "description": (
+            "Assign model geometry to a CAM operation by selecting faces from a body "
+            "in the manufacturing model. Equivalent to clicking a body in Fusion's "
+            "geometry selection dialog. By default selects all faces of the body "
+            "(body_index=0). Must be called before cam_generate_toolpath for "
+            "operations that require geometry input (adaptive, contour, pocket). "
+            "After assignment the toolpath is outdated — call cam_generate_toolpath "
+            "to regenerate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "setup_name": {
+                    "type": "string",
+                    "description": "Name of the setup containing the operation.",
+                },
+                "operation_name": {
+                    "type": "string",
+                    "description": "Name of the operation to assign geometry to.",
+                },
+                "body_index": {
+                    "type": "integer",
+                    "description": (
+                        "Zero-based index of the body in the manufacturing model "
+                        "(default 0, the first/only body). Ignored if body_name is set."
+                    ),
+                    "default": 0,
+                },
+                "body_name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the body to select geometry from. "
+                        "Overrides body_index when provided."
+                    ),
+                },
+                "face_indices": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Zero-based face indices to select from the body. "
+                        "Omit to select all faces (recommended for most operations)."
+                    ),
+                },
+            },
+            "required": ["setup_name", "operation_name"],
+        },
+    },
+    {
+        "name": "cam_create_document_tool",
+        "title": "Create Document Tool",
+        "description": (
+            "Add a cutting tool to the document tool library so it can be assigned "
+            "to CAM operations via cam_set_operation_tool. Must be called before "
+            "cam_set_operation_tool if the document library is empty. "
+            "tool_type options: flat_end_mill, ball_end_mill, "
+            "bull_nose, drill, chamfer. "
+            "All measurements in mm."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_number": {
+                    "type": "integer",
+                    "description": "Tool number (default 1)",
+                    "default": 1,
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Human-readable tool description "
+                        "(default 'Flat End Mill')"
+                    ),
+                },
+                "tool_type": {
+                    "type": "string",
+                    "enum": [
+                        "flat_end_mill",
+                        "ball_end_mill",
+                        "bull_nose",
+                        "drill",
+                        "chamfer",
+                    ],
+                    "description": "Tool geometry type (default flat_end_mill)",
+                },
+                "diameter_mm": {
+                    "type": "number",
+                    "description": "Cutting diameter in mm (default 6.0)",
+                    "default": 6.0,
+                },
+                "flute_length_mm": {
+                    "type": "number",
+                    "description": "Flute length in mm (default 15.0)",
+                    "default": 15.0,
+                },
+                "overall_length_mm": {
+                    "type": "number",
+                    "description": "Overall tool length in mm (default 50.0)",
+                    "default": 50.0,
+                },
+                "number_of_flutes": {
+                    "type": "integer",
+                    "description": "Number of flutes (default 4)",
+                    "default": 4,
+                },
+                "corner_radius_mm": {
+                    "type": "number",
+                    "description": "Corner radius in mm, 0 for sharp (default 0.0)",
+                    "default": 0.0,
+                },
+            },
+        },
+    },
+    {
+        "name": "cam_set_operation_tool",
+        "title": "Set Operation Tool",
+        "description": (
+            "Assign a tool from the document tool library to a CAM operation. "
+            "Must be called before cam_generate_toolpath — Fusion silently refuses "
+            "to generate a toolpath with no tool assigned. Identify the tool by "
+            "tool_number (exact) or tool_description "
+            "(partial, case-insensitive match). "
+            "Use cam_get_tools to list available tool numbers and descriptions first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "setup_name": {
+                    "type": "string",
+                    "description": "Name of the setup containing the operation.",
+                },
+                "operation_name": {
+                    "type": "string",
+                    "description": "Name of the operation to assign a tool to.",
+                },
+                "tool_number": {
+                    "type": "integer",
+                    "description": (
+                        "Tool number from the document library (exact match). "
+                        "Use cam_get_tools to find valid numbers."
+                    ),
+                },
+                "tool_description": {
+                    "type": "string",
+                    "description": (
+                        "Partial, case-insensitive substring to match against "
+                        "tool descriptions. First match wins."
+                    ),
+                },
+            },
+            "required": ["setup_name", "operation_name"],
         },
     },
 ]
