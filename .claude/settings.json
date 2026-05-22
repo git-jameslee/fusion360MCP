@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fusion360": {
+      "command": "uv",
+      "args": ["run", "fusion360-mcp-server"],
+      "cwd": "c:\\Users\\Nanja\\fusion360-mcp-server"
+    }
+  }
+}

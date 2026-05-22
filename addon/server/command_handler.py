@@ -2674,15 +2674,203 @@ class CommandHandler:
         op_input = setup.operations.createInput(fusion_strategy)
         if name:
             op_input.name = name
-        if tool_diameter:
-            op_input.toolDiameter = adsk.core.ValueInput.createByReal(tool_diameter)
         if stepdown:
             op_input.maximumStepdown = adsk.core.ValueInput.createByReal(stepdown)
         if stepover:
             op_input.maximumStepover = adsk.core.ValueInput.createByReal(stepover)
 
         op = setup.operations.add(op_input)
-        return {"name": op.name, "setup": setup_name, "strategy": strategy}
+        params = op.parameters
+
+        # --- Tool assignment ---
+        # Match by tool_number or tool_diameter in the document library.
+        # If nothing matches, fall back to first tool; if library is empty,
+        # auto-create a flat endmill with the requested diameter.
+        tool_lib = cam.documentToolLibrary
+        assigned_tool = None
+
+        for i in range(tool_lib.count):
+            try:
+                t = tool_lib.item(i)
+                if tool_number is not None:
+                    p = t.parameters.itemByName("tool_number")
+                    if p and int(round(p.value.value)) == tool_number:
+                        assigned_tool = t
+                        break
+                elif tool_diameter is not None:
+                    p = t.parameters.itemByName("tool_diameter")
+                    if p and abs(p.value.value - tool_diameter) < 0.001:
+                        assigned_tool = t
+                        break
+            except Exception:
+                continue
+        if assigned_tool is None and tool_lib.count > 0:
+            assigned_tool = tool_lib.item(0)
+
+        if assigned_tool is None and tool_diameter:
+            import json as _json
+            dm = tool_diameter * 10  # cm → mm
+            tool_json = _json.dumps({
+                "type": "flat end mill",
+                "description": f"{dm:.4g}mm Flat Endmill",
+                "unit": "millimeters",
+                "shaft": {"bladeCount": 4},
+                "geometry": {
+                    "DC": dm, "LCF": dm * 3, "SFDM": dm, "OAL": dm * 10,
+                    "shoulderLength": dm * 5, "fluteLength": dm * 3,
+                },
+                "start-values": {"presets": [{"description": "default",
+                    "n": spindle_speed or 10000,
+                    "Vf": feed_rate or 1000,
+                    "Vf_plunge": (feed_rate or 1000) * 0.3,
+                    "Vf_ramp":   (feed_rate or 1000) * 0.5,
+                    "stepdown": dm * 0.3, "stepover": dm * 0.18}]},
+                "post-process": {"number": 1, "comment": "", "break-control": False,
+                                 "length-offset": 1, "diameter-offset": 1},
+            })
+            try:
+                tool_obj = adsk.cam.Tool.createFromJson(tool_json)
+                tool_lib.add(tool_obj)
+                assigned_tool = tool_lib.item(tool_lib.count - 1)
+            except Exception:
+                pass
+
+        if assigned_tool is not None:
+            try:
+                op.tool = assigned_tool
+            except Exception:
+                pass
+
+        # --- Feeds and speeds ---
+        if feed_rate or spindle_speed:
+            feed_map = {
+                "tool_feedCutting":  feed_rate,
+                "tool_feedEntry":    feed_rate,
+                "tool_feedExit":     feed_rate,
+                "tool_feedTransition": feed_rate,
+                "tool_feedPlunge":   (feed_rate * 0.3) if feed_rate else None,
+                "tool_feedRamp":     (feed_rate * 0.5) if feed_rate else None,
+                "tool_spindleSpeed": spindle_speed,
+                "finishFeedrate":    feed_rate,
+            }
+            for pname, val in feed_map.items():
+                if val is None:
+                    continue
+                p = params.itemByName(pname)
+                if p:
+                    try:
+                        p.value.value = val
+                    except Exception:
+                        pass
+
+        # --- Geometry auto-detection ---
+        # pocket2d / adaptive2d: set 'pockets' chain to floor faces of any
+        # recesses found in the setup model body, then use 'from contour' for
+        # bottomHeight so the depth matches the pocket floor automatically.
+        # contour2d: set 'contours' chain to the outer loop of the top face,
+        # then use 'from surface bottom' so the full body height is milled.
+        _POCKET_STRATEGIES  = {"pocket2d", "adaptive2d"}
+        _CONTOUR_STRATEGIES = {"contour2d"}
+
+        if fusion_strategy in _POCKET_STRATEGIES or fusion_strategy in _CONTOUR_STRATEGIES:
+            try:
+                if setup.models.count > 0:
+                    model_body = setup.models.item(0)
+                    top_z = model_body.boundingBox.maxPoint.z
+
+                    if fusion_strategy in _POCKET_STRATEGIES:
+                        # Collect all upward-facing faces below the model top
+                        floor_faces = []
+                        for face in model_body.faces:
+                            try:
+                                n = face.evaluator.getNormalAtPoint(face.pointOnFace)[1]
+                                if abs(n.z - 1.0) < 0.01:
+                                    if abs(face.boundingBox.minPoint.z - top_z) > 0.01:
+                                        floor_faces.append(face)
+                            except Exception:
+                                continue
+
+                        if floor_faces:
+                            # Use the shallowest pocket floor (highest Z)
+                            floor_face = max(floor_faces, key=lambda f: f.boundingBox.minPoint.z)
+                            floor_edges = list(floor_face.edges)
+
+                            p_geom = params.itemByName("pockets")
+                            if p_geom:
+                                cv = adsk.cam.CadContours2dParameterValue.cast(p_geom.value)
+                                css = cv.getCurveSelections()
+                                chain = css.createNewChainSelection()
+                                chain.inputGeometry = floor_edges
+                                cv.applyCurveSelections(css)
+
+                            p_bh = params.itemByName("bottomHeight_mode")
+                            if p_bh:
+                                p_bh.value.value = "from contour"
+                            p_bho = params.itemByName("bottomHeight_offset")
+                            if p_bho:
+                                p_bho.value.value = 0.0
+
+                    elif fusion_strategy in _CONTOUR_STRATEGIES:
+                        # Top face = upward normal at max Z
+                        top_face = None
+                        for face in model_body.faces:
+                            try:
+                                n = face.evaluator.getNormalAtPoint(face.pointOnFace)[1]
+                                if (abs(n.z - 1.0) < 0.01 and
+                                        abs(face.boundingBox.minPoint.z - top_z) < 0.01):
+                                    top_face = face
+                                    break
+                            except Exception:
+                                continue
+
+                        if top_face:
+                            outer_loop = max(
+                                top_face.loops,
+                                key=lambda l: sum(e.length for e in l.edges),
+                            )
+                            outer_edges = list(outer_loop.edges)
+
+                            p_geom = params.itemByName("contours")
+                            if p_geom:
+                                cv = adsk.cam.CadContours2dParameterValue.cast(p_geom.value)
+                                css = cv.getCurveSelections()
+                                chain = css.createNewChainSelection()
+                                chain.inputGeometry = outer_edges
+                                cv.applyCurveSelections(css)
+
+                            p_bh = params.itemByName("bottomHeight_mode")
+                            if p_bh:
+                                p_bh.value.value = "from surface bottom"
+                            p_bho = params.itemByName("bottomHeight_offset")
+                            if p_bho:
+                                p_bho.value.value = 0.0
+            except Exception:
+                pass  # geometry failure is non-fatal; caller can set manually
+
+        # Toggle a boolean to flush Fusion's cached error state after all changes
+        p_md = params.itemByName("doMultipleDepths")
+        if p_md:
+            try:
+                orig = p_md.value.value
+                p_md.value.value = not orig
+                p_md.value.value = orig
+            except Exception:
+                pass
+
+        tool_desc = None
+        if assigned_tool:
+            try:
+                tool_desc = assigned_tool.description
+            except Exception:
+                pass
+
+        return {
+            "name": op.name,
+            "setup": setup_name,
+            "strategy": strategy,
+            "tool_assigned": tool_desc,
+            "has_error": self._safe_cam_attr(op, "hasError", None),
+        }
 
     def cam_generate_toolpath(
         self,
@@ -2772,6 +2960,26 @@ class CommandHandler:
             output_folder = os.path.join(os.path.expanduser("~"), "Desktop")
 
         post_config = os.path.join(cam.genericPostFolder, f"{post_processor}.cps")
+        if not os.path.exists(post_config):
+            # genericPostFolder is a cache dir that may be empty; search the
+            # webdeploy Posts directory for the .cps file.
+            import glob as _glob
+            webdeploy = os.path.join(
+                os.path.expanduser("~"),
+                "AppData", "Local", "Autodesk", "webdeploy", "production",
+            )
+            matches = _glob.glob(
+                os.path.join(webdeploy, "**", f"{post_processor}.cps"),
+                recursive=True,
+            )
+            if matches:
+                post_config = matches[0]
+            else:
+                raise RuntimeError(
+                    f"Post processor '{post_processor}.cps' not found in "
+                    f"{cam.genericPostFolder} or {webdeploy}. "
+                    f"Available: {[os.path.basename(p) for p in _glob.glob(os.path.join(webdeploy, '**', '*.cps'), recursive=True)[:10]]}"
+                )
 
         units = (
             adsk.cam.PostOutputUnitOptions.MillimetersOutput
@@ -3054,8 +3262,10 @@ class CommandHandler:
     def cam_get_tools(self):
         cam = self._get_cam()
 
-        # Build operation cross-reference: tool_number → [op names]
-        ops_by_tool_num = {}
+        # Build operation cross-reference: (tool_number, description) → [op names]
+        # Keying on both fields avoids cross-contamination when all tools share
+        # tool_number 0 (Fusion ignores the number field on createFromJson).
+        ops_by_tool_key = {}
         for op in self._safe_cam_iter(cam.allOperations):
             if self._safe_cam_attr(op, "isSuppressed"):
                 continue
@@ -3063,8 +3273,9 @@ class CommandHandler:
                 tool = op.tool
                 if tool:
                     num = self._read_cam_param(tool.parameters, "tool_number")
-                    if num is not None:
-                        ops_by_tool_num.setdefault(int(num), []).append(op.name)
+                    desc = self._safe_cam_attr(tool, "description", "")
+                    key = (int(num) if num is not None else -1, desc or "")
+                    ops_by_tool_key.setdefault(key, []).append(op.name)
             except Exception:
                 pass
 
@@ -3077,9 +3288,10 @@ class CommandHandler:
                 try:
                     info = self._extract_tool_record(tool)
                     num = int(info.get("tool_number", -1))
+                    desc = info.get("description", "") or ""
                     tools_list.append({
                         "tool": info,
-                        "used_in_operations": ops_by_tool_num.get(num, []),
+                        "used_in_operations": ops_by_tool_key.get((num, desc), []),
                     })
                 except Exception:
                     pass
@@ -3094,14 +3306,13 @@ class CommandHandler:
                     tool = op.tool
                     if tool:
                         num = self._read_cam_param(tool.parameters, "tool_number")
-                        key = int(num) if num is not None else op.name
+                        desc = self._safe_cam_attr(tool, "description", "") or ""
+                        key = (int(num) if num is not None else -1, desc)
                         if key not in seen:
                             seen[key] = self._extract_tool_record(tool)
                             tools_list.append({
                                 "tool": seen[key],
-                                "used_in_operations": ops_by_tool_num.get(
-                                    key if isinstance(key, int) else -1, []
-                                ),
+                                "used_in_operations": ops_by_tool_key.get(key, []),
                             })
                 except Exception:
                     pass
@@ -3599,28 +3810,14 @@ class CommandHandler:
                     "no 'tool_number' parameter found on the operation."
                 )
 
-        assigned_num = _tool_number(matched_tool)
-        assigned_desc = _tool_description(matched_tool)
-        try:
-            diameter_cm = self._read_cam_param(
-                matched_tool.parameters, "tool_diameter"
-            )
-            diameter_mm = round(diameter_cm * 10.0, 4) if diameter_cm else None
-        except Exception:
-            diameter_mm = None
+        tool_record = self._extract_tool_record(matched_tool)
 
-        result = {
+        return {
             "success": True,
             "operation": operation_name,
             "library_source": library_source,
-            "tool_assigned": {
-                "number": assigned_num,
-                "description": assigned_desc,
-            },
+            "tool_assigned": tool_record,
         }
-        if diameter_mm is not None:
-            result["tool_assigned"]["diameter_mm"] = diameter_mm
-        return result
 
     # ── 11. cam_create_document_tool ─────────────────────────────────
 
@@ -3651,7 +3848,33 @@ class CommandHandler:
         cam = self._get_cam()
         tool_lib = cam.documentToolLibrary
 
+        # Dedup: return existing tool if same type + diameter + flutes already present.
         type_str = self._TOOL_TYPE_JSON.get(tool_type, "flat end mill")
+        for i in range(tool_lib.count):
+            try:
+                existing = tool_lib.item(i)
+                existing_type = str(existing.type) if hasattr(existing, "type") else ""
+                existing_diam_cm = self._read_cam_param(existing.parameters, "tool_diameter")
+                existing_flutes = self._read_cam_param(existing.parameters, "tool_numberOfFlutes")
+                if (
+                    existing_type == type_str
+                    and existing_diam_cm is not None
+                    and abs(existing_diam_cm * 10 - diameter_mm) < 0.01
+                    and existing_flutes is not None
+                    and int(existing_flutes) == number_of_flutes
+                ):
+                    return {
+                        "success": True,
+                        "already_exists": True,
+                        "tool_number": self._read_cam_param(existing.parameters, "tool_number"),
+                        "description": self._safe_cam_attr(existing, "description", ""),
+                        "tool_type": tool_type,
+                        "type_str": type_str,
+                        "diameter_mm": diameter_mm,
+                        "document_library_count": tool_lib.count,
+                    }
+            except Exception:
+                continue
         tool_data = {
             "type": type_str,
             "unit": "millimeters",
@@ -3660,6 +3883,12 @@ class CommandHandler:
             "product-id": f"mcp-tool-{tool_number}",
             "BMC": "carbide",
             "number": tool_number,
+            "post-process": {
+                "number": tool_number,
+                "comment": "",
+                "diameter-offset": tool_number,
+                "length-offset": tool_number,
+            },
             "DC": diameter_mm,
             "LCF": flute_length_mm,
             "OAL": overall_length_mm,
@@ -3720,9 +3949,23 @@ class CommandHandler:
         # Add to document library
         add_result = tool_lib.add(tool_obj)
 
+        # Fusion ignores the "number" JSON field on createFromJson — try to
+        # set tool_number directly on the parameter object after library add.
+        actual_number = tool_number
+        try:
+            added = tool_lib.item(tool_lib.count - 1)
+            p = added.parameters.itemByName("tool_number")
+            if p is not None:
+                p.expression = str(tool_number)
+            actual_number = self._read_cam_param(added.parameters, "tool_number")
+            if actual_number is None:
+                actual_number = tool_number
+        except Exception:
+            pass
+
         return {
             "success": True,
-            "tool_number": tool_number,
+            "tool_number": actual_number,
             "description": description,
             "tool_type": tool_type,
             "type_str": type_str,
