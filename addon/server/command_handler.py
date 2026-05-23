@@ -3126,10 +3126,12 @@ class CommandHandler:
         else:
             cam.postProcess(setup, post_input)
 
+        output_file = os.path.join(output_folder, f"{program_number}.nc")
         return {
             "setup": setup_name,
             "post_processor": post_processor,
             "output_folder": output_folder,
+            "output_file": output_file,
             "units": output_units,
         }
 
@@ -3543,14 +3545,18 @@ class CommandHandler:
     def cam_get_library_tools(self, library_name: str = None):
         cam = self._get_cam()
 
-        # Document library — always available
+        # Document library — always available; dedup on (tool_number, description)
         doc_tools = []
+        seen_doc = set()
         try:
             for i in range(cam.documentToolLibrary.count):
                 try:
-                    doc_tools.append(
-                        self._extract_tool_record(cam.documentToolLibrary.item(i))
-                    )
+                    info = self._extract_tool_record(cam.documentToolLibrary.item(i))
+                    key = (int(info.get("tool_number", -1)), info.get("description", "") or "")
+                    if key in seen_doc:
+                        continue
+                    seen_doc.add(key)
+                    doc_tools.append(info)
                 except Exception:
                     pass
         except Exception:
@@ -3591,9 +3597,15 @@ class CommandHandler:
                         if not lib:
                             continue
                         tools = []
+                        seen_ext = set()
                         for tool in self._safe_cam_iter(lib):
                             try:
-                                tools.append(self._extract_tool_record(tool))
+                                info = self._extract_tool_record(tool)
+                                key = (int(info.get("tool_number", -1)), info.get("description", "") or "")
+                                if key in seen_ext:
+                                    continue
+                                seen_ext.add(key)
+                                tools.append(info)
                             except Exception:
                                 pass
                         results.append({
@@ -3653,7 +3665,9 @@ class CommandHandler:
                 p = setup_params.itemByName(fusion_key)
                 if p is None:
                     warnings.append(
-                        f"'{fusion_key}' not available on this setup"
+                        f"'{fusion_key}' not available on this setup — "
+                        "machine parameters only exist when a machine configuration "
+                        "is assigned (Setup → Machine tab in Fusion 360)"
                     )
                     skipped.append(user_key)
                     continue
