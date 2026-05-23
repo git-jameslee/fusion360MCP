@@ -2615,6 +2615,24 @@ class CommandHandler:
         stock_offset_bottom: float = 0,
     ):
         cam = self._get_cam()
+
+        # Warn if a setup with this name already exists — prevents silent duplicates
+        if name:
+            for i in range(cam.setups.count):
+                try:
+                    if cam.setups.item(i).name == name:
+                        existing = cam.setups.item(i)
+                        ops = [op.name for op in self._safe_cam_iter(existing.allOperations)]
+                        raise RuntimeError(
+                            f"A setup named '{name}' already exists with "
+                            f"{len(ops)} operation(s): {ops}. "
+                            "Use cam_delete_setup to remove it first, or choose a different name."
+                        )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+
         body = self._body_by_name(body_name)
 
         op_type_map = {
@@ -2924,8 +2942,9 @@ class CommandHandler:
                             auto_geometry_note = (
                                 "Auto-geometry failed: no pocket floor faces found. "
                                 "The body appears to be solid (no recesses). "
-                                "Call cam_set_operation_geometry to assign geometry manually "
-                                "before calling cam_generate_toolpath."
+                                "2D adaptive/pocket strategies require a body with recessed pockets. "
+                                "For a solid block, use the 'face' strategy instead to machine the top surface. "
+                                "If pockets are intended, add them to the model first, then recreate this operation."
                             )
 
                     elif fusion_strategy in _CONTOUR_STRATEGIES:
@@ -3053,13 +3072,22 @@ class CommandHandler:
             poll = _poll_future(future, operation_name)
             has_tp = self._safe_cam_attr(op, "hasToolpath", False)
             valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
-            return {
+            result = {
                 "scope": "operation",
                 "operation": operation_name,
                 "has_toolpath": has_tp,
                 "is_valid": valid,
                 **poll,
             }
+            if not has_tp:
+                result["note"] = (
+                    "Toolpath generation completed but produced no output. "
+                    "Common causes: (1) geometry not assigned — call cam_set_operation_geometry first; "
+                    "(2) strategy incompatible with model — 2D adaptive/pocket require a body with recesses, "
+                    "use 'face' strategy for solid blocks; "
+                    "(3) operation has an error — check has_error in cam_get_operation_details."
+                )
+            return result
 
         if setup_name:
             setup = self._find_setup(cam, setup_name)
@@ -3122,8 +3150,28 @@ class CommandHandler:
 
         if operation_name:
             op = self._find_operation(setup, operation_name)
+            has_tp = self._safe_cam_attr(op, "hasToolpath", False)
+            valid = self._safe_cam_attr(op, "isToolpathValid", False) if has_tp else False
+            if not valid:
+                raise RuntimeError(
+                    f"Operation '{operation_name}' has no valid toolpath. "
+                    "Call cam_generate_toolpath first and confirm is_valid: true "
+                    "before post-processing."
+                )
             cam.postProcess(op, post_input)
         else:
+            # Check at least one valid toolpath exists in the setup
+            any_valid = any(
+                self._safe_cam_attr(op, "isToolpathValid", False)
+                for op in self._safe_cam_iter(setup.allOperations)
+                if self._safe_cam_attr(op, "hasToolpath", False)
+            )
+            if not any_valid:
+                raise RuntimeError(
+                    f"Setup '{setup_name}' has no valid toolpaths. "
+                    "Call cam_generate_toolpath first and confirm is_valid: true "
+                    "before post-processing."
+                )
             cam.postProcess(setup, post_input)
 
         output_file = os.path.join(output_folder, f"{program_number}.nc")
@@ -3836,6 +3884,11 @@ class CommandHandler:
 
         # ── Collect faces ──────────────────────────────────────────────
         if face_indices is not None:
+            if len(face_indices) == 0:
+                raise RuntimeError(
+                    "face_indices must not be empty. "
+                    "Omit face_indices to select all faces, or provide at least one index."
+                )
             faces = []
             for fi in face_indices:
                 if fi >= target_body.faces.count:
