@@ -769,6 +769,14 @@ class TestMockCAM:
         assert result["body_name"] == "Part1"
         assert result["operation_type"] == "milling"
 
+    def test_cam_delete_setup(self):
+        result = mock_command(
+            "cam_delete_setup",
+            {"setup_name": "Setup1"},
+        )
+        assert result["success"] is True
+        assert result["deleted_setup"] == "Setup1"
+
     def test_cam_create_operation(self):
         result = mock_command(
             "cam_create_operation",

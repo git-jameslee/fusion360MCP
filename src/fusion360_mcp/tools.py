@@ -1859,11 +1859,36 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "cam_delete_setup",
+        "title": "Delete CAM Setup",
+        "description": (
+            "Delete a CAM setup and all its operations. "
+            "Use this to reset CAM state before starting fresh. "
+            "Irreversible — recreate the setup with cam_create_setup afterward."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["setup_name"],
+            "properties": {
+                "setup_name": {
+                    "type": "string",
+                    "description": "Name of the setup to delete",
+                },
+            },
+        },
+    },
+    {
         "name": "cam_create_operation",
         "title": "Create CAM Operation",
         "description": (
             "Add a machining operation to a setup. "
-            "Strategy determines the toolpath type."
+            "Strategy determines the toolpath type. "
+            "IMPORTANT: Fusion renames operations automatically — the name in the "
+            "response (e.g. 'Face2') is the actual name. Always use the name returned "
+            "by this call for subsequent cam_generate_toolpath / cam_get_operation_details "
+            "calls, not the name you requested. "
+            "Sensible feedrate and stepover defaults are applied automatically; "
+            "override with feed_rate / spindle_speed / stepover / stepdown if needed."
         ),
         "inputSchema": {
             "type": "object",
@@ -1896,37 +1921,41 @@ TOOLS: list[dict] = [
                 },
                 "name": {
                     "type": "string",
-                    "description": "Operation name",
+                    "description": (
+                        "Requested operation name. Fusion may rename it "
+                        "(e.g. 'Face2'). Use the name in the response, not this value."
+                    ),
                 },
                 "tool_number": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Tool number from library",
+                    "description": "Tool number from library (preferred over tool_diameter_mm)",
                 },
-                "tool_diameter": {
+                "tool_diameter_mm": {
                     "type": "number",
                     "minimum": 0.001,
                     "description": (
-                        "Tool diameter (cm) — used if tool_number not specified"
+                        "Tool diameter in mm — used if tool_number not specified. "
+                        "Matches cam_get_tools output units."
                     ),
                 },
                 "stepdown": {
                     "type": "number",
                     "minimum": 0.001,
-                    "description": "Axial depth of cut (cm)",
+                    "description": "Axial depth of cut (cm). Defaults applied per strategy.",
                 },
                 "stepover": {
                     "type": "number",
                     "minimum": 0.001,
-                    "description": ("Radial stepover (cm)"),
+                    "description": "Radial stepover (cm). Defaults applied per strategy.",
                 },
                 "feed_rate": {
                     "type": "number",
-                    "description": "Feed rate (cm/min)",
+                    "description": "Cutting feedrate (cm/min). Strategy default applied if omitted.",
                 },
                 "spindle_speed": {
                     "type": "number",
-                    "description": "Spindle speed (RPM)",
+                    "description": "Spindle speed (RPM). Strategy default applied if omitted.",
                 },
                 "coolant": {
                     "type": "string",
@@ -1945,23 +1974,36 @@ TOOLS: list[dict] = [
         "name": "cam_generate_toolpath",
         "title": "Generate Toolpath",
         "description": (
-            "Generate toolpaths for a specific operation or all operations in a setup"
+            "Generate toolpaths for a specific operation or all operations in a setup. "
+            "setup_name is REQUIRED unless generate_all=true. "
+            "To generate one operation: provide setup_name + operation_name. "
+            "To generate all operations in a setup: provide only setup_name. "
+            "To regenerate everything in the document: set generate_all=true."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "setup_name": {
                     "type": "string",
-                    "description": ("Setup name (generates all its operations)"),
+                    "description": (
+                        "Setup name. Required unless generate_all=true. "
+                        "Omit only when generate_all=true."
+                    ),
                 },
                 "operation_name": {
                     "type": "string",
-                    "description": ("Specific operation name (overrides setup_name)"),
+                    "description": (
+                        "Specific operation name within the setup. "
+                        "Requires setup_name. Omit to generate all operations in the setup."
+                    ),
                 },
                 "generate_all": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Generate all toolpaths",
+                    "description": (
+                        "Generate all toolpaths in the entire document. "
+                        "setup_name and operation_name are ignored when true."
+                    ),
                 },
             },
         },
@@ -2365,9 +2407,11 @@ TOOLS: list[dict] = [
         "name": "cam_create_document_tool",
         "title": "Create Document Tool",
         "description": (
-            "Add a cutting tool to the document tool library so it can be assigned "
-            "to CAM operations via cam_set_operation_tool. Must be called before "
-            "cam_set_operation_tool if the document library is empty. "
+            "Add a cutting tool to the document tool library. "
+            "IMPORTANT: call cam_get_tools first — if a tool with the same "
+            "tool_number or geometry already exists this call returns it unchanged "
+            "(no duplicate is created). Only call this when cam_get_tools confirms "
+            "no suitable tool exists. "
             "tool_type options: flat_end_mill, ball_end_mill, "
             "bull_nose, drill, chamfer. "
             "All measurements in mm."
@@ -2494,7 +2538,7 @@ _READ_ONLY = {
     "get_design_type",
     "render_view",
 }
-_DESTRUCTIVE = {"delete_all", "delete_parameter"}
+_DESTRUCTIVE = {"delete_all", "delete_parameter", "cam_delete_setup"}
 _IDEMPOTENT = {
     "ping",
     "get_scene_info",

@@ -160,6 +160,7 @@ def test_expected_tools_present():
         "unfold",
         # CAM / manufacturing
         "cam_create_setup",
+        "cam_delete_setup",
         "cam_create_operation",
         "cam_generate_toolpath",
         "cam_post_process",

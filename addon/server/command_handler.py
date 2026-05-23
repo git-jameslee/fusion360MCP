@@ -204,6 +204,7 @@ class CommandHandler:
                 "cam_list_operations": self.cam_list_operations,
                 "cam_get_operation_info": self.cam_get_operation_info,
                 "cam_create_setup": self.cam_create_setup,
+                "cam_delete_setup": self.cam_delete_setup,
                 "cam_create_operation": self.cam_create_operation,
                 "cam_generate_toolpath": self.cam_generate_toolpath,
                 "cam_post_process": self.cam_post_process,
@@ -2637,13 +2638,25 @@ class CommandHandler:
         setup = cam.setups.add(setup_input)
         return {"name": setup.name, "body": body_name, "operation_type": operation_type}
 
+    def cam_delete_setup(self, setup_name: str):
+        cam = self._get_cam()
+        setup = self._find_setup(cam, setup_name)
+        op_names = [op.name for op in self._safe_cam_iter(setup.operations)]
+        setup.deleteMe()
+        return {
+            "success": True,
+            "deleted_setup": setup_name,
+            "deleted_operations": op_names,
+        }
+
     def cam_create_operation(
         self,
         setup_name: str,
         strategy: str,
         name: str = None,
         tool_number: int = None,
-        tool_diameter: float = None,
+        tool_diameter_mm: float = None,  # preferred (mm, matches cam_get_tools output)
+        tool_diameter: float = None,     # legacy (cm)
         stepdown: float = None,
         stepover: float = None,
         feed_rate: float = None,
@@ -2668,16 +2681,18 @@ class CommandHandler:
         }
         fusion_strategy = _STRATEGY_MAP.get(strategy, strategy)
 
+        # Normalize tool_diameter_mm (preferred, mm) → tool_diameter (internal, cm)
+        if tool_diameter_mm is not None and tool_diameter is None:
+            tool_diameter = tool_diameter_mm * 0.1
+
         cam = self._get_cam()
         setup = self._find_setup(cam, setup_name)
 
         op_input = setup.operations.createInput(fusion_strategy)
         if name:
             op_input.name = name
-        if stepdown:
-            op_input.maximumStepdown = adsk.core.ValueInput.createByReal(stepdown)
-        if stepover:
-            op_input.maximumStepover = adsk.core.ValueInput.createByReal(stepover)
+        # stepover/stepdown are applied after tool assignment so we can use
+        # the actual tool diameter to compute strategy-specific defaults.
 
         op = setup.operations.add(op_input)
         params = op.parameters
@@ -2742,24 +2757,113 @@ class CommandHandler:
                 pass
 
         # --- Feeds and speeds ---
-        if feed_rate or spindle_speed:
-            feed_map = {
-                "tool_feedCutting":  feed_rate,
-                "tool_feedEntry":    feed_rate,
-                "tool_feedExit":     feed_rate,
-                "tool_feedTransition": feed_rate,
-                "tool_feedPlunge":   (feed_rate * 0.3) if feed_rate else None,
-                "tool_feedRamp":     (feed_rate * 0.5) if feed_rate else None,
-                "tool_spindleSpeed": spindle_speed,
-                "finishFeedrate":    feed_rate,
-            }
-            for pname, val in feed_map.items():
-                if val is None:
-                    continue
+        # Strategy-specific defaults (cm/min and RPM) so feedrates are never 0.
+        # Values are conservative but realistic for aluminium on a desktop CNC.
+        _FEED_DEFAULTS = {
+            "face":      (500.0, 10000),   # high stepover facing pass
+            "pocket2d":  (300.0,  8000),
+            "adaptive2d":(400.0,  8000),
+            "contour2d": (300.0,  8000),
+            "adaptive":  (400.0,  8000),
+            "scallop":   (300.0,  8000),
+            "parallel":  (300.0,  8000),
+            "drill":     (150.0,  3000),
+            "bore":      (100.0,  3000),
+            "thread":    (200.0,  2000),
+            "slot":      (200.0,  8000),
+            "trace":     (300.0,  8000),
+            "engrave":   (200.0, 10000),
+            "ramp":      (200.0,  8000),
+        }
+        default_feed, default_rpm = _FEED_DEFAULTS.get(fusion_strategy, (300.0, 8000))
+        eff_feed = feed_rate if feed_rate else default_feed
+        eff_rpm  = spindle_speed if spindle_speed else default_rpm
+
+        feed_map = {
+            "tool_feedCutting":    eff_feed,
+            "tool_feedEntry":      eff_feed,
+            "tool_feedExit":       eff_feed,
+            "tool_feedTransition": eff_feed,
+            "tool_feedPlunge":     eff_feed * 0.3,
+            "tool_feedRamp":       eff_feed * 0.5,
+            "tool_spindleSpeed":   eff_rpm,
+            "finishFeedrate":      eff_feed,
+        }
+        for pname, val in feed_map.items():
+            p = params.itemByName(pname)
+            if p:
+                try:
+                    p.value.value = val
+                except Exception:
+                    pass
+
+        # --- Stepover / stepdown defaults ---
+        # Derive tool diameter from assigned tool (cm units) for percentage-based defaults.
+        _tool_diam_cm = None
+        if assigned_tool:
+            try:
+                _p = assigned_tool.parameters.itemByName("tool_diameter")
+                if _p:
+                    _tool_diam_cm = _p.value.value
+            except Exception:
+                pass
+        if _tool_diam_cm is None and tool_diameter:
+            _tool_diam_cm = tool_diameter  # already cm
+
+        # Stepover defaults as fraction of tool diameter; facing uses 85% (one wide pass).
+        _STEPOVER_FRAC = {
+            "face":       0.85,
+            "pocket2d":   0.45,
+            "adaptive2d": 0.18,  # optimal load style
+            "contour2d":  0.45,
+            "adaptive":   0.18,
+            "scallop":    0.20,
+            "parallel":   0.30,
+        }
+        # Stepdown defaults as fraction of tool diameter.
+        _STEPDOWN_FRAC = {
+            "face":       0.30,
+            "pocket2d":   0.30,
+            "adaptive2d": 0.30,
+            "contour2d":  0.50,
+            "adaptive":   0.30,
+            "scallop":    0.10,
+            "parallel":   0.20,
+        }
+
+        if not stepover and _tool_diam_cm and fusion_strategy in _STEPOVER_FRAC:
+            eff_stepover = _tool_diam_cm * _STEPOVER_FRAC[fusion_strategy]
+            for pname in ("stepover", "maximumStepover", "optimalLoad"):
                 p = params.itemByName(pname)
                 if p:
                     try:
-                        p.value.value = val
+                        p.value.value = eff_stepover
+                    except Exception:
+                        pass
+        elif stepover:
+            for pname in ("stepover", "maximumStepover", "optimalLoad"):
+                p = params.itemByName(pname)
+                if p:
+                    try:
+                        p.value.value = stepover
+                    except Exception:
+                        pass
+
+        if not stepdown and _tool_diam_cm and fusion_strategy in _STEPDOWN_FRAC:
+            eff_stepdown = _tool_diam_cm * _STEPDOWN_FRAC[fusion_strategy]
+            for pname in ("stepdown", "maximumStepdown"):
+                p = params.itemByName(pname)
+                if p:
+                    try:
+                        p.value.value = eff_stepdown
+                    except Exception:
+                        pass
+        elif stepdown:
+            for pname in ("stepdown", "maximumStepdown"):
+                p = params.itemByName(pname)
+                if p:
+                    try:
+                        p.value.value = stepdown
                     except Exception:
                         pass
 
@@ -2771,6 +2875,9 @@ class CommandHandler:
         # then use 'from surface bottom' so the full body height is milled.
         _POCKET_STRATEGIES  = {"pocket2d", "adaptive2d"}
         _CONTOUR_STRATEGIES = {"contour2d"}
+
+        auto_geometry_ok = False
+        auto_geometry_note = None
 
         if fusion_strategy in _POCKET_STRATEGIES or fusion_strategy in _CONTOUR_STRATEGIES:
             try:
@@ -2809,6 +2916,17 @@ class CommandHandler:
                             p_bho = params.itemByName("bottomHeight_offset")
                             if p_bho:
                                 p_bho.value.value = 0.0
+                            auto_geometry_ok = True
+                        else:
+                            # Solid body — no recessed floor faces found.
+                            # Adaptive/pocket strategies need pocket geometry to generate
+                            # a toolpath; without it Fusion will produce no output.
+                            auto_geometry_note = (
+                                "Auto-geometry failed: no pocket floor faces found. "
+                                "The body appears to be solid (no recesses). "
+                                "Call cam_set_operation_geometry to assign geometry manually "
+                                "before calling cam_generate_toolpath."
+                            )
 
                     elif fusion_strategy in _CONTOUR_STRATEGIES:
                         # Top face = upward normal at max Z
@@ -2844,6 +2962,12 @@ class CommandHandler:
                             p_bho = params.itemByName("bottomHeight_offset")
                             if p_bho:
                                 p_bho.value.value = 0.0
+                            auto_geometry_ok = True
+                        else:
+                            auto_geometry_note = (
+                                "Auto-geometry failed: could not find top face. "
+                                "Call cam_set_operation_geometry to assign geometry manually."
+                            )
             except Exception:
                 pass  # geometry failure is non-fatal; caller can set manually
 
@@ -2864,13 +2988,16 @@ class CommandHandler:
             except Exception:
                 pass
 
-        return {
+        result = {
             "name": op.name,
             "setup": setup_name,
             "strategy": strategy,
             "tool_assigned": tool_desc,
             "has_error": self._safe_cam_attr(op, "hasError", None),
         }
+        if auto_geometry_note:
+            result["geometry_warning"] = auto_geometry_note
+        return result
 
     def cam_generate_toolpath(
         self,
@@ -3145,26 +3272,23 @@ class CommandHandler:
         except Exception:
             pass
 
-        # Parameters — return raw internal values; caller interprets units
-        PARAM_KEYS = [
-            "tool_feedCutting", "tool_feedEntry", "tool_feedExit",
-            "tool_feedPlunge", "tool_feedRamp", "tool_feedReducedCutting",
-            "tool_spindleSpeed", "tool_spindleDirection",
-            "stepover", "stepdown", "optimalLoad",
-            "tolerance", "stockToLeave", "axialStock",
-            "tool_coolant",
-        ]
+        # Parameters — return using the same user-friendly keys accepted by
+        # cam_update_operation_parameters so Qwen can read then write without
+        # mapping internal names. Values already converted to display units.
         params_out = {}
-        for key in PARAM_KEYS:
-            val = self._read_cam_param(op_params, key)
+        for user_key, (fusion_key, unit, scale) in self._OP_PARAM_MAP.items():
+            val = self._read_cam_param(op_params, fusion_key)
             if val is not None:
-                # Convert cm-based values to mm for readability
-                if key in ("stepover", "stepdown", "optimalLoad",
-                           "tolerance", "stockToLeave", "axialStock"):
-                    val = round(val * 10, 4)  # cm → mm
-                elif "feed" in key.lower():
-                    val = round(val * 10, 4)  # cm/min → mm/min
-                params_out[key] = val
+                params_out[user_key] = round(val / scale, 4)
+
+        # tool_spindleDirection is read-only metadata not in _OP_PARAM_MAP
+        sd = self._read_cam_param(op_params, "tool_spindleDirection")
+        if sd is not None:
+            params_out["spindle_direction"] = sd
+
+        coolant = self._read_cam_param(op_params, "tool_coolant")
+        if coolant is not None:
+            params_out["coolant"] = coolant
 
         # Auto-capture is intentionally omitted — iterating all CAM params
         # is too expensive and causes TCP bridge timeouts.
@@ -3322,14 +3446,19 @@ class CommandHandler:
         # Primary: document tool library
         lib = self._safe_cam_attr(cam, "documentToolLibrary")
         if lib:
+            seen_lib = set()
             for tool in self._safe_cam_iter(lib):
                 try:
                     info = self._extract_tool_record(tool)
                     num = int(info.get("tool_number", -1))
                     desc = info.get("description", "") or ""
+                    key = (num, desc)
+                    if key in seen_lib:
+                        continue
+                    seen_lib.add(key)
                     tools_list.append({
                         "tool": info,
-                        "used_in_operations": ops_by_tool_key.get((num, desc), []),
+                        "used_in_operations": ops_by_tool_key.get(key, []),
                     })
                 except Exception:
                     pass
@@ -3706,6 +3835,11 @@ class CommandHandler:
             faces = [target_body.faces.item(i) for i in range(target_body.faces.count)]
 
         # ── Assign to operation geometry parameter ─────────────────────
+        # CadObjectParameterValue requires an ObjectCollection, not a plain list.
+        face_col = adsk.core.ObjectCollection.create()
+        for f in faces:
+            face_col.add(f)
+
         param_used = None
         for param_name in self._MODEL_PARAM_NAMES:
             try:
@@ -3715,7 +3849,7 @@ class CommandHandler:
                 geom = p.value  # CadObjectParameterValue
                 if geom is None:
                     continue
-                geom.value = faces
+                geom.value = face_col
                 param_used = param_name
                 break
             except Exception:
@@ -3886,25 +4020,32 @@ class CommandHandler:
         cam = self._get_cam()
         tool_lib = cam.documentToolLibrary
 
-        # Dedup: return existing tool if same type + diameter + flutes already present.
+        # Dedup: return existing tool if same tool_number OR same type+diameter+flutes.
+        # Prevents library pollution across multi-step sessions.
         type_str = self._TOOL_TYPE_JSON.get(tool_type, "flat end mill")
         for i in range(tool_lib.count):
             try:
                 existing = tool_lib.item(i)
+                existing_num = self._read_cam_param(existing.parameters, "tool_number")
                 existing_type = str(existing.type) if hasattr(existing, "type") else ""
                 existing_diam_cm = self._read_cam_param(existing.parameters, "tool_diameter")
                 existing_flutes = self._read_cam_param(existing.parameters, "tool_numberOfFlutes")
-                if (
+
+                same_number = (
+                    existing_num is not None and int(round(existing_num)) == tool_number
+                )
+                same_geometry = (
                     existing_type == type_str
                     and existing_diam_cm is not None
                     and abs(existing_diam_cm * 10 - diameter_mm) < 0.01
                     and existing_flutes is not None
                     and int(existing_flutes) == number_of_flutes
-                ):
+                )
+                if same_number or same_geometry:
                     return {
                         "success": True,
                         "already_exists": True,
-                        "tool_number": self._read_cam_param(existing.parameters, "tool_number"),
+                        "tool_number": existing_num,
                         "description": self._safe_cam_attr(existing, "description", ""),
                         "tool_type": tool_type,
                         "type_str": type_str,

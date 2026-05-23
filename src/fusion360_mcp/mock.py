@@ -879,11 +879,14 @@ def _cam_get_operation_details(p: dict) -> dict:
             "tool_type": "flat end mill",
         },
         "parameters": {
-            "tool_feedCutting": 1200.0,
-            "tool_spindleSpeed": 18000.0,
-            "stepover": 1.5,
-            "stepdown": 3.0,
-            "tolerance": 0.01,
+            "cutting_feedrate_mmpm": 1200.0,
+            "entry_feedrate_mmpm": 1200.0,
+            "plunge_feedrate_mmpm": 360.0,
+            "ramp_feedrate_mmpm": 600.0,
+            "spindle_speed_rpm": 18000.0,
+            "stepover_mm": 1.5,
+            "stepdown_mm": 3.0,
+            "tolerance_mm": 0.01,
         },
     }
 
@@ -1155,6 +1158,11 @@ _DISPATCH: dict[str, Any] = {
     "unfold": _unfold,
     # CAM / manufacturing — existing
     "cam_create_setup": _cam_create_setup,
+    "cam_delete_setup": lambda p: {
+        "success": True,
+        "deleted_setup": p.get("setup_name", "Setup1"),
+        "deleted_operations": [],
+    },
     "cam_create_operation": _cam_create_operation,
     "cam_generate_toolpath": _cam_generate_toolpath,
     "cam_post_process": _cam_post_process,
