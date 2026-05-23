@@ -864,7 +864,9 @@ class TestMockCAM:
             },
         )
         assert result["success"] is True
-        assert "cutting_feedrate_mmpm" in result["updated"]
+        assert "changes" in result
+        assert result["changes_applied"] == 1
+        assert result["changes"][0]["parameter"] == "cutting_feedrate_mmpm"
 
     def test_cam_get_tools(self):
         result = mock_command("cam_get_tools")

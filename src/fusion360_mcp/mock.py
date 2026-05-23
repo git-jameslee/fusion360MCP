@@ -780,10 +780,12 @@ def _cam_generate_toolpath(p: dict) -> dict:
 def _cam_post_process(p: dict) -> dict:
     setup = p.get("setup_name", "Setup1")
     post = p.get("post_processor", "fanuc")
+    prog = p.get("program_number", 1)
     return {
         "setup_name": setup,
         "post_processor": post,
-        "output_file": f"~/Desktop/{setup}.nc",
+        "program_number": prog,
+        "output_file": f"~/Desktop/O{prog:04d}.nc",
         "output_units": p.get("output_units", "mm"),
     }
 
@@ -888,11 +890,17 @@ def _cam_get_operation_details(p: dict) -> dict:
 
 def _cam_update_operation_parameters(p: dict) -> dict:
     params = p.get("parameters", {})
+    changes = [
+        {"parameter": k, "fusion_param": k, "unit": "mm/min", "before": 1000.0, "after": v}
+        for k, v in params.items()
+    ]
     return {
         "success": True,
         "operation": p.get("operation_name", "Adaptive1"),
-        "updated": list(params.keys()),
+        "changes": changes,
+        "changes_applied": len(changes),
         "skipped": [],
+        "has_error": False,
         "warnings": [],
     }
 

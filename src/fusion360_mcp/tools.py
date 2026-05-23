@@ -2000,6 +2000,14 @@ TOOLS: list[dict] = [
                     "enum": ["mm", "in"],
                     "default": "mm",
                 },
+                "program_number": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": (
+                        "NC program number (O-number for FANUC, 1–9999). "
+                        "Defaults to 1."
+                    ),
+                },
             },
         },
     },

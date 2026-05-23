@@ -2952,6 +2952,7 @@ class CommandHandler:
         post_processor: str = "fanuc",
         output_folder: str = None,
         output_units: str = "mm",
+        program_number: int = 1,
     ):
         cam = self._get_cam()
         setup = self._find_setup(cam, setup_name)
@@ -2988,7 +2989,7 @@ class CommandHandler:
         )
 
         post_input = adsk.cam.PostProcessInput.create(
-            setup_name, post_config, output_folder, units
+            str(program_number), post_config, output_folder, units
         )
         post_input.isOpenInEditor = False
 
@@ -3183,25 +3184,28 @@ class CommandHandler:
 
     # ── 3. cam_update_operation_parameters ────────────────────────────
 
-    # Maps user-friendly keys → (fusion_param_name, expression_unit_suffix)
+    # Maps user-friendly keys → (fusion_param_name, display_unit, to_internal_scale)
+    # CAM operation params use .value.value in Fusion internal units (cm, cm/min, rpm).
+    # to_internal_scale: multiply user display value by this to get internal value.
+    #   mm → cm:         scale = 0.1
+    #   mm/min → cm/min: scale = 0.1
+    #   rpm → rpm:       scale = 1.0
     _OP_PARAM_MAP = {
-        "tool_diameter_mm":       ("tool_diameter",              "mm"),
-        "cutting_feedrate_mmpm":  ("tool_feedCutting",          "mm/min"),
-        "entry_feedrate_mmpm":    ("tool_feedEntry",             "mm/min"),
-        "exit_feedrate_mmpm":     ("tool_feedExit",              "mm/min"),
-        "plunge_feedrate_mmpm":   ("tool_feedPlunge",            "mm/min"),
-        "ramp_feedrate_mmpm":     ("tool_feedRamp",              "mm/min"),
-        "reduced_feedrate_mmpm":  ("tool_feedReducedCutting",    "mm/min"),
-        "spindle_speed_rpm":      ("tool_spindleSpeed",          "rpm"),
-        # Stepover: 2D ops use "stepover", 2D Adaptive uses "optimalLoad"
-        "stepover_mm":            ("stepover",                   "mm"),
-        "optimal_load_mm":        ("optimalLoad",                "mm"),
-        # Stepdown names vary by strategy — try both via alias below
-        "stepdown_mm":            ("stepdown",                   "mm"),
-        "max_stepdown_mm":        ("maximumStepdown",            "mm"),
-        "tolerance_mm":           ("tolerance",                  "mm"),
-        "stock_to_leave_mm":      ("stockToLeave",               "mm"),
-        "axial_stock_mm":         ("axialStock",                 "mm"),
+        "tool_diameter_mm":       ("tool_diameter",           "mm",     0.1),
+        "cutting_feedrate_mmpm":  ("tool_feedCutting",        "mm/min", 0.1),
+        "entry_feedrate_mmpm":    ("tool_feedEntry",          "mm/min", 0.1),
+        "exit_feedrate_mmpm":     ("tool_feedExit",           "mm/min", 0.1),
+        "plunge_feedrate_mmpm":   ("tool_feedPlunge",         "mm/min", 0.1),
+        "ramp_feedrate_mmpm":     ("tool_feedRamp",           "mm/min", 0.1),
+        "reduced_feedrate_mmpm":  ("tool_feedReducedCutting", "mm/min", 0.1),
+        "spindle_speed_rpm":      ("tool_spindleSpeed",       "rpm",    1.0),
+        "stepover_mm":            ("stepover",                "mm",     0.1),
+        "optimal_load_mm":        ("optimalLoad",             "mm",     0.1),
+        "stepdown_mm":            ("stepdown",                "mm",     0.1),
+        "max_stepdown_mm":        ("maximumStepdown",         "mm",     0.1),
+        "tolerance_mm":           ("tolerance",               "mm",     0.1),
+        "stock_to_leave_mm":      ("stockToLeave",            "mm",     0.1),
+        "axial_stock_mm":         ("axialStock",              "mm",     0.1),
     }
 
     def cam_update_operation_parameters(
@@ -3212,7 +3216,7 @@ class CommandHandler:
         op = self._find_operation_all(setup, operation_name)
         op_params = op.parameters
 
-        updated = []
+        changes = []
         skipped = []
         warnings = []
 
@@ -3225,7 +3229,7 @@ class CommandHandler:
                 skipped.append(user_key)
                 continue
 
-            fusion_key, unit = self._OP_PARAM_MAP[user_key]
+            fusion_key, unit, scale = self._OP_PARAM_MAP[user_key]
             try:
                 p = op_params.itemByName(fusion_key)
                 if p is None:
@@ -3241,19 +3245,53 @@ class CommandHandler:
                         continue
                 except Exception:
                     pass
-                p.expression = f"{value} {unit}"
-                updated.append(user_key)
+
+                # Read before value (internal unit → display unit)
+                try:
+                    before_display = round(p.value.value / scale, 4)
+                except Exception:
+                    before_display = None
+
+                # Write via .value.value in Fusion internal units (cm, cm/min, rpm)
+                # CAM operation params do not support .expression — must set .value.value
+                p.value.value = float(value) * scale
+
+                # Read after to confirm
+                try:
+                    after_display = round(p.value.value / scale, 4)
+                except Exception:
+                    after_display = float(value)
+
+                changes.append({
+                    "parameter": user_key,
+                    "fusion_param": fusion_key,
+                    "unit": unit,
+                    "before": before_display,
+                    "after": after_display,
+                })
             except Exception as e:
                 warnings.append(f"Failed to set '{user_key}': {e}")
                 skipped.append(user_key)
 
+        # Flush Fusion's cached error state after changing params
+        p_md = op_params.itemByName("doMultipleDepths")
+        if p_md:
+            try:
+                orig = p_md.value.value
+                p_md.value.value = not orig
+                p_md.value.value = orig
+            except Exception:
+                pass
+
         adsk.doEvents()
 
         return {
-            "success": len(updated) > 0,
+            "success": len(changes) > 0,
             "operation": operation_name,
-            "updated": updated,
+            "changes": changes,
+            "changes_applied": len(changes),
             "skipped": skipped,
+            "has_error": self._safe_cam_attr(op, "hasError", None),
             "warnings": warnings,
         }
 
