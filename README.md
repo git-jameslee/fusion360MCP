@@ -91,7 +91,7 @@ Call the `ping` tool from your client. If it returns `{"pong": true}`, everythin
 2. Stop the add-in in Fusion (Shift+S → Add-Ins → Fusion360MCP → Stop)
 3. Delete the add-in folder from Fusion's AddIns directory
 
-## Available Tools (84)
+## Available Tools (97)
 
 ### Scene & Query
 | Tool | Description |
@@ -228,12 +228,24 @@ Call the `ping` tool from your client. If it returns `{"pong": true}`, everythin
 | Tool | Description |
 |------|-------------|
 | `cam_create_setup` | Create a manufacturing setup (milling/turning/cutting) |
-| `cam_create_operation` | Add a machining operation (face, contour, adaptive, drilling, etc.) |
+| `cam_delete_setup` | Delete a setup and all its operations |
+| `cam_create_operation` | Add a machining operation (face, contour, adaptive, drilling, etc.) with auto geometry detection |
 | `cam_generate_toolpath` | Generate toolpaths for operations |
 | `cam_post_process` | Post-process to G-code (fanuc, grbl, haas, etc.) |
 | `cam_list_setups` | List all manufacturing setups |
 | `cam_list_operations` | List operations in a setup |
-| `cam_get_operation_info` | Get operation details (strategy, tool, parameters) |
+| `cam_get_operation_info` | Get operation strategy and assigned tool |
+| `cam_get_operation_details` | Get full operation parameters (feeds, speeds, stepover, stepdown, tool geometry, tolerance, stock-to-leave) |
+| `cam_update_operation_parameters` | Write feeds, speeds, stepover, stepdown, and tool geometry to an operation |
+| `cam_get_toolpath_status` | Query toolpath validity (has_toolpath, is_valid, is_outdated, has_error) |
+| `cam_get_machining_time` | Get cycle time estimates per operation and setup total |
+| `cam_get_tools` | List tools in the document tool library |
+| `cam_get_library_tools` | Query tools from an external tool library |
+| `cam_create_document_tool` | Create a new tool in the document library |
+| `cam_set_operation_tool` | Assign a tool from the document library to an operation |
+| `cam_set_operation_geometry` | Assign body faces to an operation's geometry (pockets, model, contour boundary) |
+| `cam_update_setup_machine_params` | Update machine limits (feed, spindle, rapid) on a setup |
+| `cam_get_nc_programs` | List NC program definitions in the document |
 
 ### Code Execution
 | Tool | Description |
@@ -253,7 +265,7 @@ Call the `ping` tool from your client. If it returns `{"pong": true}`, everythin
 
 ```bash
 uv sync --dev       # install deps
-uv run pytest -v    # run tests (171 tests)
+uv run pytest -v    # run tests (309 tests)
 uv run ruff check   # lint
 ```
 
