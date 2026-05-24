@@ -8,7 +8,7 @@
 set -euo pipefail
 
 REPO_ADDON="$(dirname "$0")/addon"
-FUSION_ADDIN="/c/Users/Nanja/AppData/Roaming/Autodesk/Autodesk Fusion 360/API/AddIns/Fusion360MCP"
+FUSION_ADDIN="/c/Users/$USERNAME/AppData/Roaming/Autodesk/Autodesk Fusion 360/API/AddIns/Fusion360MCP"
 
 if [ ! -d "$FUSION_ADDIN" ]; then
     echo "ERROR: Add-in folder not found: $FUSION_ADDIN" >&2
