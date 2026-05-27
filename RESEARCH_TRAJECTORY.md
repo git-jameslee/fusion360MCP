@@ -5,9 +5,13 @@
 
 ---
 
-## Original Goal (Unchanged)
+## Research Goal
 
-Fine-tune Qwen3-8B to match or outperform Qwen3-30B on Fusion 360 CAM tool-use tasks, using a structured MCP-based automation pipeline.
+Build a publishable ML result in industrial-grade CAD/CAM automation via MCP, structured in two phases:
+
+**Phase 1 — Evaluation:** Design and run evaluation protocols to establish how well existing models (Claude Sonnet, Qwen3-8B, Gemma 4) perform on real CAD/CAM tasks. Measures are both subjective (1–7 human ratings) and objective (voxel IoU, toolpath validity, dimension accuracy). This phase stands on its own — it produces the first systematic benchmark of LLM CAM tool-use capability.
+
+**Phase 2 — Fine-tuning:** Use the baseline gaps from Phase 1 to guide QLoRA fine-tuning of Qwen3-8B on TACC Lonestar6 (A100 40GB). Demonstrate that fine-tuned Qwen3-8B matches or outperforms Qwen3-30B base at 4x smaller scale. The key claim is that **reasoning-annotated training data** — not bare tool call logs — is what produces the improvement.
 
 ---
 
@@ -194,7 +198,9 @@ llamafactory-cli train config.yaml
 
 > Fine-tuned Qwen3-8B produces expert-aligned CAM reasoning on held-out parts, matching a 30B base model's output at 4x smaller scale — and the key ingredient is **reasoning-annotated training data** rather than bare tool call logs.
 
-The hand-annotated eval set (not Claude self-evaluation) is what makes this claim defensible.
+Two things make this defensible:
+1. **A systematic baseline** (Phase 1) that shows where and how much existing models fall short — not just anecdotal failures
+2. **A hand-annotated held-out eval set** (not Claude self-evaluation) that measures whether the fine-tuned model generalizes to parts it has never seen
 
 ---
 
