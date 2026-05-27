@@ -327,6 +327,11 @@ class CommandHandler:
                     return b
         raise RuntimeError(f"Body '{name}' not found")
 
+    def _set_models_coll(self, setup_input, obj):
+        coll = adsk.core.ObjectCollection.create()
+        coll.add(obj)
+        setup_input.models = coll
+
     def _component_by_name(self, name: str):
         root = self._root()
         if root.name == name:
@@ -869,6 +874,8 @@ class CommandHandler:
         sketch = self._last_sketch()
         if sketch.profiles.count == 0:
             raise RuntimeError("No profiles in sketch")
+        if profile_index >= sketch.profiles.count:
+            raise RuntimeError(f"profile_index {profile_index} out of range ({sketch.profiles.count} profiles)")
         profile = sketch.profiles.item(profile_index)
 
         ext_feats = root.features.extrudeFeatures
@@ -911,6 +918,8 @@ class CommandHandler:
         sketch = self._last_sketch()
         if sketch.profiles.count == 0:
             raise RuntimeError("No profiles in sketch")
+        if profile_index >= sketch.profiles.count:
+            raise RuntimeError(f"profile_index {profile_index} out of range ({sketch.profiles.count} profiles)")
         profile = sketch.profiles.item(profile_index)
 
         # Determine axis entity first (required for createInput)
@@ -962,6 +971,8 @@ class CommandHandler:
 
         if sketch.profiles.count == 0:
             raise RuntimeError("No profiles in sketch")
+        if profile_index >= sketch.profiles.count:
+            raise RuntimeError(f"profile_index {profile_index} out of range ({sketch.profiles.count} profiles)")
         profile = sketch.profiles.item(profile_index)
 
         path_curves = list(path_sketch.sketchCurves)
@@ -1003,6 +1014,8 @@ class CommandHandler:
     ):
         self._require_parametric()
         root = self._root()
+        if not body_name and body_index >= root.bRepBodies.count:
+            raise RuntimeError(f"body_index {body_index} out of range ({root.bRepBodies.count} bodies)")
         body = (
             self._body_by_name(body_name)
             if body_name
@@ -1026,6 +1039,8 @@ class CommandHandler:
         edge_selection: str = "all",
     ):
         root = self._root()
+        if not body_name and body_index >= root.bRepBodies.count:
+            raise RuntimeError(f"body_index {body_index} out of range ({root.bRepBodies.count} bodies)")
         body = (
             self._body_by_name(body_name)
             if body_name
@@ -1051,6 +1066,8 @@ class CommandHandler:
         face_selection: str = "top",
     ):
         root = self._root()
+        if not body_name and body_index >= root.bRepBodies.count:
+            raise RuntimeError(f"body_index {body_index} out of range ({root.bRepBodies.count} bodies)")
         body = (
             self._body_by_name(body_name)
             if body_name
@@ -1093,6 +1110,8 @@ class CommandHandler:
 
     def mirror(self, mirror_plane: str, body_name: str = None, body_index: int = 0):
         root = self._root()
+        if not body_name and body_index >= root.bRepBodies.count:
+            raise RuntimeError(f"body_index {body_index} out of range ({root.bRepBodies.count} bodies)")
         body = (
             self._body_by_name(body_name)
             if body_name
@@ -1118,6 +1137,8 @@ class CommandHandler:
         center_y: float = 0,
     ):
         root = self._root()
+        if not body_name and body_index >= root.bRepBodies.count:
+            raise RuntimeError(f"body_index {body_index} out of range ({root.bRepBodies.count} bodies)")
         body = (
             self._body_by_name(body_name)
             if body_name
@@ -2346,6 +2367,8 @@ class CommandHandler:
 
         if sketch.profiles.count == 0:
             raise RuntimeError("No profiles in sketch")
+        if profile_index >= sketch.profiles.count:
+            raise RuntimeError(f"profile_index {profile_index} out of range ({sketch.profiles.count} profiles)")
         profile = sketch.profiles.item(profile_index)
 
         patches = root.features.patchFeatures
@@ -2464,6 +2487,8 @@ class CommandHandler:
 
         if bend_line_sketch:
             sketch = self._sketch_by_name(bend_line_sketch)
+            if sketch.sketchCurves.sketchLines.count == 0:
+                raise RuntimeError(f"No lines found in sketch '{bend_line_sketch}'")
             bend_line = sketch.sketchCurves.sketchLines.item(0)
 
             bends = root.features.bendFeatures
@@ -2521,15 +2546,42 @@ class CommandHandler:
     # ------------------------------------------------------------------
 
     def _get_cam(self):
-        """Get the CAM product from the active document."""
+        """Get the CAM product, auto-activating the Manufacturing workspace if needed."""
+        import time
+        import adsk
         doc = self.app.activeDocument
-        cam_product = doc.products.itemByProductType("CAMProductType")
-        if not cam_product:
+
+        # itemByProductType raises RuntimeError (not returns None) when not found
+        try:
+            cam_product = doc.products.itemByProductType("CAMProductType")
+            if cam_product:
+                return cam_product
+        except RuntimeError:
+            pass
+
+        # CAM not yet initialised — activate the Manufacturing workspace and wait
+        mfg_ws = self.ui.workspaces.itemById("CAMEnvironment")
+        if not mfg_ws:
             raise RuntimeError(
-                "No CAM workspace found. Open the Manufacturing workspace "
-                "in Fusion 360 at least once to initialise it."
+                "CAMEnvironment workspace not found. "
+                "Ensure the Manufacturing extension is installed in Fusion 360."
             )
-        return cam_product
+        mfg_ws.activate()
+        adsk.doEvents()
+        time.sleep(1)
+        adsk.doEvents()
+
+        try:
+            cam_product = doc.products.itemByProductType("CAMProductType")
+            if cam_product:
+                return cam_product
+        except RuntimeError:
+            pass
+
+        raise RuntimeError(
+            "CAM workspace activated but CAMProductType still not available. "
+            "Try switching to the Manufacturing workspace manually once."
+        )
 
     def _find_setup(self, cam, name: str):
         for i in range(cam.setups.count):
@@ -2648,13 +2700,42 @@ class CommandHandler:
             )
 
         setup_input = cam.setups.createInput(op_type)
-        setup_input.models = [body]
 
         if name:
             setup_input.name = name
 
+        # setup_input.models is a BaseVector; it accepts a Python list[BRepBody].
+        # Components are rejected ("not a valid setup model type").
+        _body = self._body_by_name(body_name)
+        setup_input.models = [_body]
+
         setup = cam.setups.add(setup_input)
-        return {"name": setup.name, "body": body_name, "operation_type": operation_type}
+
+        # Apply stock offsets (values are in cm — Fusion's internal unit).
+        # Try the two naming conventions Fusion uses across API versions.
+        _stock_offset_candidates = [
+            ("top",    stock_offset_top,    ("stock_offset_top",    "stockOffsetTop")),
+            ("sides",  stock_offset_sides,  ("stock_offset_side",   "stockOffsetSide")),
+            ("bottom", stock_offset_bottom, ("stock_offset_bottom", "stockOffsetBottom")),
+        ]
+        stock_applied = {}
+        for axis, val, names in _stock_offset_candidates:
+            if val == 0:
+                continue
+            for pname in names:
+                try:
+                    p = setup.parameters.itemByName(pname)
+                    if p is not None:
+                        p.value.value = val
+                        stock_applied[axis] = pname
+                        break
+                except Exception:
+                    continue
+
+        result = {"name": setup.name, "body": body_name, "operation_type": operation_type}
+        if stock_applied:
+            result["stock_offsets_applied"] = stock_applied
+        return result
 
     def cam_delete_setup(self, setup_name: str):
         cam = self._get_cam()
@@ -2794,7 +2875,9 @@ class CommandHandler:
             "ramp":      (200.0,  8000),
         }
         default_feed, default_rpm = _FEED_DEFAULTS.get(fusion_strategy, (300.0, 8000))
-        eff_feed = feed_rate if feed_rate else default_feed
+        # feed_rate is in mm/min (per system prompt); convert to cm/min for Fusion internal.
+        # Defaults are already in cm/min.
+        eff_feed = (feed_rate * 0.1) if feed_rate else default_feed
         eff_rpm  = spindle_speed if spindle_speed else default_rpm
 
         feed_map = {
@@ -2885,6 +2968,19 @@ class CommandHandler:
                     except Exception:
                         pass
 
+        # --- Face strategy: disable stock-contour tracing ---
+        # Fusion 360 sometimes defaults useStockContours=True for the face
+        # strategy, which generates a single perimeter trace instead of a
+        # raster fill over the whole face.  Explicitly disable it.
+        if fusion_strategy == "face":
+            for pname in ("useStockContours", "stockContours"):
+                p = params.itemByName(pname)
+                if p:
+                    try:
+                        p.value.value = False
+                    except Exception:
+                        pass
+
         # --- Geometry auto-detection ---
         # pocket2d / adaptive2d: set 'pockets' chain to floor faces of any
         # recesses found in the setup model body, then use 'from contour' for
@@ -2899,8 +2995,25 @@ class CommandHandler:
 
         if fusion_strategy in _POCKET_STRATEGIES or fusion_strategy in _CONTOUR_STRATEGIES:
             try:
+                # setup.models is empty when setup_input.models was not set (our default).
+                # Fall back to fetching the first body from the design directly.
+                model_body = None
                 if setup.models.count > 0:
                     model_body = setup.models.item(0)
+                else:
+                    try:
+                        doc = self.app.activeDocument
+                        for _i in range(doc.products.count):
+                            _p = doc.products.item(_i)
+                            if _p.productType == "DesignProductType":
+                                import adsk.fusion as _af
+                                _design = _af.Design.cast(_p)
+                                if _design and _design.rootComponent.bRepBodies.count > 0:
+                                    model_body = _design.rootComponent.bRepBodies.item(0)
+                                break
+                    except Exception:
+                        pass
+                if model_body is not None:
                     top_z = model_body.boundingBox.maxPoint.z
 
                     if fusion_strategy in _POCKET_STRATEGIES:
@@ -3808,7 +3921,6 @@ class CommandHandler:
     _MODEL_PARAM_NAMES = (
         "pockets",           # 2D Adaptive, 2D Pocket
         "model",             # 3D Adaptive, Scallop, etc.
-        "stockContours",     # stock boundary contours
         "machiningBoundary", # some 3D ops
         "silhouette",        # silhouette-based ops
         "tool_frame",        # misc
@@ -4135,15 +4247,17 @@ class CommandHandler:
                 "diameter-offset": tool_number,
                 "length-offset": tool_number,
             },
-            "DC": diameter_mm,
-            "LCF": flute_length_mm,
-            "OAL": overall_length_mm,
-            "ZEFF": number_of_flutes,
-            "NOF": number_of_flutes,
-            "RE": corner_radius_mm,
-            "APMX": diameter_mm,
-            "RPMF": 0,
-            "fz": 0.0,
+            "geometry": {
+                "DC":   diameter_mm,
+                "LCF":  flute_length_mm,
+                "OAL":  overall_length_mm,
+                "ZEFF": number_of_flutes,
+                "NOF":  number_of_flutes,
+                "RE":   corner_radius_mm,
+                "APMX": diameter_mm,
+                "SFDM": diameter_mm,
+                "shoulderLength": flute_length_mm,
+            },
         }
 
         tool_obj = None
@@ -4526,7 +4640,7 @@ class CommandHandler:
         ``spec`` is ``(eye_dir, up_vec)`` from ``_VIEW_DIRS``.
         """
         eye_dir, up_vec = spec
-        design = self.app.activeProduct
+        design = self.app.activeDocument.products.itemByProductType("DesignProductType")
         root = design.rootComponent if design is not None else None
 
         # Target is the model centroid (or origin if no bodies).
